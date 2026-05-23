@@ -5,7 +5,58 @@ import {
   GIT_DIFF_TIMEOUT_MS,
   GIT_STATUS_TIMEOUT_MS,
 } from "../src/constants.js";
-import { collectGitContext } from "../src/git.js";
+import { collectGitContext, isNotGitRepositoryError } from "../src/git.js";
+
+describe("isNotGitRepositoryError", () => {
+  it("detects not-a-git-repository errors from stderr", () => {
+    expect(
+      isNotGitRepositoryError({
+        stderr: "fatal: not a git repository (or any of the parent directories): .git",
+      }),
+    ).toBe(true);
+  });
+
+  it("detects not-a-git-repository errors from stdout", () => {
+    expect(
+      isNotGitRepositoryError({
+        stdout: "not a git repository",
+      }),
+    ).toBe(true);
+  });
+
+  it("detects not-a-git-repository errors from Error.message", () => {
+    expect(isNotGitRepositoryError(new Error("fatal: not a git repository"))).toBe(true);
+  });
+
+  it("detects not-a-git-repository errors from a string", () => {
+    expect(isNotGitRepositoryError("fatal: not a git repository")).toBe(true);
+  });
+
+  it("detects not-a-git-repository errors case-insensitively", () => {
+    expect(isNotGitRepositoryError("Not a Git Repository")).toBe(true);
+    expect(isNotGitRepositoryError(new Error("Fatal: Not A Git Repository"))).toBe(true);
+  });
+
+  it("returns false for null", () => {
+    expect(isNotGitRepositoryError(null)).toBe(false);
+  });
+
+  it("returns false for undefined", () => {
+    expect(isNotGitRepositoryError(undefined)).toBe(false);
+  });
+
+  it("returns false for an empty object", () => {
+    expect(isNotGitRepositoryError({})).toBe(false);
+  });
+
+  it("returns false for an unrelated error message", () => {
+    expect(isNotGitRepositoryError(new Error("permission denied"))).toBe(false);
+  });
+
+  it("returns false for a different git error", () => {
+    expect(isNotGitRepositoryError("fatal: ambiguous argument 'HEAD'")).toBe(false);
+  });
+});
 
 describe("collectGitContext", () => {
   it("collects git status, diff stat, and diff when enabled", async () => {
@@ -238,5 +289,95 @@ describe("collectGitContext", () => {
     const result = await collectGitContext({ pi, config });
 
     expect(result.diff).toBeNull();
+  });
+});
+
+describe("collectGitContext non-git handling", () => {
+  it("returns unavailable git context when status fails outside a git repository", async () => {
+    const pi = {
+      exec: vi.fn(async () => {
+        throw {
+          stderr: "fatal: not a git repository (or any of the parent directories): .git",
+        };
+      }),
+    };
+
+    await expect(
+      collectGitContext({
+        pi,
+        config: defaultConfig,
+      }),
+    ).resolves.toEqual({
+      status: null,
+      diffStat: null,
+      diff: null,
+      unavailableReason: "Git context unavailable: current directory is not a git repository.",
+    });
+    expect(pi.exec).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns unavailable git context when diff stat fails outside a git repository", async () => {
+    const pi = {
+      exec: vi
+        .fn()
+        .mockResolvedValueOnce({ stdout: "" })
+        .mockRejectedValueOnce(
+          new Error("fatal: not a git repository (or any of the parent directories): .git"),
+        ),
+    };
+
+    await expect(
+      collectGitContext({
+        pi,
+        config: defaultConfig,
+      }),
+    ).resolves.toEqual({
+      status: null,
+      diffStat: null,
+      diff: null,
+      unavailableReason: "Git context unavailable: current directory is not a git repository.",
+    });
+    expect(pi.exec).toHaveBeenCalledTimes(2);
+  });
+
+  it("propagates unrelated git errors", async () => {
+    const pi = {
+      exec: vi.fn(async () => {
+        throw new Error("permission denied");
+      }),
+    };
+
+    await expect(
+      collectGitContext({
+        pi,
+        config: defaultConfig,
+      }),
+    ).rejects.toThrow("permission denied");
+  });
+
+  it("does not add unavailableReason when git collection is disabled", async () => {
+    const pi = {
+      exec: vi.fn(),
+    };
+    const config = {
+      ...defaultConfig,
+      git: {
+        ...defaultConfig.git,
+        enabled: false,
+      },
+    };
+
+    const result = await collectGitContext({
+      pi,
+      config,
+    });
+
+    expect(result).toEqual({
+      status: null,
+      diffStat: null,
+      diff: null,
+    });
+    expect("unavailableReason" in result).toBe(false);
+    expect(pi.exec).not.toHaveBeenCalled();
   });
 });

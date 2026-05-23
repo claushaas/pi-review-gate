@@ -21,6 +21,31 @@ type GitExecAPI = {
   }>;
 };
 
+function getErrorText(error: unknown): string {
+  if (typeof error === "string") {
+    return error;
+  }
+  if (typeof error !== "object" || error === null) {
+    return "";
+  }
+  const parts: string[] = [];
+  if ("stderr" in error && typeof error.stderr === "string") {
+    parts.push(error.stderr);
+  }
+  if ("stdout" in error && typeof error.stdout === "string") {
+    parts.push(error.stdout);
+  }
+  if ("message" in error && typeof error.message === "string") {
+    parts.push(error.message);
+  }
+  return parts.join("\n");
+}
+
+export function isNotGitRepositoryError(error: unknown): boolean {
+  const text = getErrorText(error);
+  return /not a git repository/i.test(text);
+}
+
 export async function collectGitContext(params: {
   pi: GitExecAPI;
   config: ReviewGateConfig;
@@ -36,36 +61,48 @@ export async function collectGitContext(params: {
     };
   }
 
-  const status = config.git.includeStatus
-    ? ((
-        await pi.exec("git", ["status", "--short"], {
-          timeout: GIT_STATUS_TIMEOUT_MS,
-          signal,
-        })
-      ).stdout ?? "")
-    : null;
+  try {
+    const status = config.git.includeStatus
+      ? ((
+          await pi.exec("git", ["status", "--short"], {
+            timeout: GIT_STATUS_TIMEOUT_MS,
+            signal,
+          })
+        ).stdout ?? "")
+      : null;
 
-  const diffStat = config.git.includeDiffStat
-    ? ((
-        await pi.exec("git", ["diff", "--stat"], {
-          timeout: GIT_DIFF_STAT_TIMEOUT_MS,
-          signal,
-        })
-      ).stdout ?? "")
-    : null;
+    const diffStat = config.git.includeDiffStat
+      ? ((
+          await pi.exec("git", ["diff", "--stat"], {
+            timeout: GIT_DIFF_STAT_TIMEOUT_MS,
+            signal,
+          })
+        ).stdout ?? "")
+      : null;
 
-  const diff = config.git.includeDiff
-    ? ((
-        await pi.exec("git", ["diff"], {
-          timeout: GIT_DIFF_TIMEOUT_MS,
-          signal,
-        })
-      ).stdout ?? "")
-    : null;
+    const diff = config.git.includeDiff
+      ? ((
+          await pi.exec("git", ["diff"], {
+            timeout: GIT_DIFF_TIMEOUT_MS,
+            signal,
+          })
+        ).stdout ?? "")
+      : null;
 
-  return {
-    status,
-    diffStat,
-    diff,
-  };
+    return {
+      status,
+      diffStat,
+      diff,
+    };
+  } catch (error) {
+    if (isNotGitRepositoryError(error)) {
+      return {
+        status: null,
+        diffStat: null,
+        diff: null,
+        unavailableReason: "Git context unavailable: current directory is not a git repository.",
+      };
+    }
+    throw error;
+  }
 }
