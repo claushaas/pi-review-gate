@@ -1,9 +1,4 @@
-export type RuntimeState = {
-  activeReview: boolean;
-  correctionCycle: number;
-  lastOriginalUserPromptHash: string | null;
-  lastReviewResult: unknown | null;
-};
+import type { RuntimeState } from "./types.js";
 
 export function createRuntimeState(): RuntimeState {
   return {
