@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
+import { defaultConfig } from "../src/config.js";
+import type { ModelClient } from "../src/model.js";
 import { createModelClientFromContext, createUnavailableModelClient } from "../src/model.js";
-import { buildReviewerSystemPrompt, buildReviewerUserPrompt } from "../src/reviewer.js";
-import type { ReviewContext } from "../src/types.js";
+import {
+  buildReviewerSystemPrompt,
+  buildReviewerUserPrompt,
+  runReviewer,
+} from "../src/reviewer.js";
+import type { ReviewContext, ReviewGateConfig } from "../src/types.js";
 
 describe("buildReviewerSystemPrompt", () => {
   it("returns a deterministic non-empty prompt", () => {
@@ -861,5 +867,225 @@ describe("createModelClientFromContext external signal", () => {
     // Listener should be cleaned up — aborting the external controller
     // after the internal timeout has already fired should be harmless.
     controller.abort();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runReviewer
+// ---------------------------------------------------------------------------
+
+const reviewContext: ReviewContext = {
+  currentUserPrompt: "Implement step 12.1.",
+  serializedEventMessages: `[message 1]
+role: user
+content:
+Implement step 12.1.`,
+  latestAssistantResponse: "Done.",
+  serializedSessionSlice: null,
+  gitStatus: " M src/reviewer.ts",
+  gitDiffStat: " src/reviewer.ts | 10 ++++++++++",
+  gitDiff: "diff --git a/src/reviewer.ts b/src/reviewer.ts",
+};
+
+const configWithReviewerModel: ReviewGateConfig = {
+  ...defaultConfig,
+  reviewerModel: {
+    provider: "test-provider",
+    id: "test-model",
+    thinkingLevel: "high",
+  },
+};
+
+describe("runReviewer", () => {
+  it("returns an approved review result from valid reviewer JSON", async () => {
+    const approvedResult = {
+      approved: true,
+      severity: "pass",
+      summary: "Delivery satisfies the request.",
+      requiredCorrections: [],
+      recommendedCorrections: [],
+      evidence: ["The diff matches the requested implementation."],
+      confidence: "high",
+    } as const;
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () => JSON.stringify(approvedResult)),
+    };
+
+    await expect(
+      runReviewer({
+        config: configWithReviewerModel,
+        reviewContext,
+        modelClient,
+      }),
+    ).resolves.toEqual(approvedResult);
+
+    expect(modelClient.complete).toHaveBeenCalledWith({
+      systemPrompt: expect.stringContaining("mandatory delivery reviewer"),
+      userPrompt: expect.stringContaining("Review the following delivery."),
+      model: configWithReviewerModel.reviewerModel,
+      signal: undefined,
+      timeoutMs: configWithReviewerModel.reviewer.timeoutMs,
+    });
+  });
+
+  it("passes the abort signal to the model client", async () => {
+    const signal = new AbortController().signal;
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () =>
+        JSON.stringify({
+          approved: true,
+          severity: "pass",
+          summary: "ok",
+          requiredCorrections: [],
+          recommendedCorrections: [],
+          evidence: [],
+          confidence: "medium",
+        }),
+      ),
+    };
+
+    await runReviewer({
+      config: configWithReviewerModel,
+      reviewContext,
+      modelClient,
+      signal,
+    });
+
+    expect(modelClient.complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        signal,
+      }),
+    );
+  });
+
+  it("returns a rejected review result from valid reviewer JSON", async () => {
+    const rejectedResult = {
+      approved: false,
+      severity: "blocking",
+      summary: "Required implementation is missing.",
+      requiredCorrections: ["Implement runReviewer."],
+      recommendedCorrections: ["Add tests for invalid reviewer responses."],
+      evidence: ["No call to modelClient.complete was found."],
+      confidence: "high",
+    } as const;
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () => JSON.stringify(rejectedResult)),
+    };
+
+    await expect(
+      runReviewer({
+        config: configWithReviewerModel,
+        reviewContext,
+        modelClient,
+      }),
+    ).resolves.toEqual(rejectedResult);
+  });
+
+  it("fails when reviewer model is not configured", async () => {
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () => "{}"),
+    };
+
+    await expect(
+      runReviewer({
+        config: {
+          ...defaultConfig,
+          reviewerModel: null,
+        },
+        reviewContext,
+        modelClient,
+      }),
+    ).rejects.toThrow("Reviewer model is not configured.");
+
+    expect(modelClient.complete).not.toHaveBeenCalled();
+  });
+
+  it("fails when reviewer response is invalid JSON", async () => {
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () => "{ invalid json }"),
+    };
+
+    await expect(
+      runReviewer({
+        config: configWithReviewerModel,
+        reviewContext,
+        modelClient,
+      }),
+    ).rejects.toThrow("Invalid reviewer response:");
+  });
+
+  it("fails when reviewer response has invalid schema", async () => {
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () =>
+        JSON.stringify({
+          approved: true,
+          severity: "critical",
+        }),
+      ),
+    };
+
+    await expect(
+      runReviewer({
+        config: configWithReviewerModel,
+        reviewContext,
+        modelClient,
+      }),
+    ).rejects.toThrow("Invalid reviewer response:");
+  });
+
+  it("propagates model client errors", async () => {
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () => {
+        throw new Error("model failed");
+      }),
+    };
+
+    await expect(
+      runReviewer({
+        config: configWithReviewerModel,
+        reviewContext,
+        modelClient,
+      }),
+    ).rejects.toThrow("model failed");
+  });
+
+  it("does not mutate config or review context", async () => {
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () =>
+        JSON.stringify({
+          approved: true,
+          severity: "pass",
+          summary: "ok",
+          requiredCorrections: [],
+          recommendedCorrections: [],
+          evidence: [],
+          confidence: "medium",
+        }),
+      ),
+    };
+
+    const config = {
+      ...configWithReviewerModel,
+      reviewerModel: {
+        ...configWithReviewerModel.reviewerModel,
+      },
+      reviewer: {
+        ...configWithReviewerModel.reviewer,
+      },
+    } as ReviewGateConfig;
+
+    const context = {
+      ...reviewContext,
+    };
+
+    const before = JSON.stringify({ config, context });
+
+    await runReviewer({
+      config,
+      reviewContext: context,
+      modelClient,
+    });
+
+    expect(JSON.stringify({ config, context })).toBe(before);
   });
 });

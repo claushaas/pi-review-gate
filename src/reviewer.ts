@@ -1,4 +1,6 @@
-import type { ReviewContext } from "./types.js";
+import type { ModelClient } from "./model.js";
+import { safeParseReviewGateResult } from "./schema.js";
+import type { ReviewContext, ReviewGateConfig, ReviewGateResult } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Private helpers for building context sections with stable missing-value markers
@@ -130,4 +132,60 @@ Return JSON only with this exact shape:
 <context>
 ${buildReviewContextSection(context)}
 </context>`;
+}
+
+// ---------------------------------------------------------------------------
+// runReviewer
+// ---------------------------------------------------------------------------
+
+/**
+ * Runs the mandatory delivery reviewer, transforming a {@link ReviewContext}
+ * into a validated {@link ReviewGateResult}.
+ *
+ * The function orchestrates the full review pipeline:
+ * 1. Validates that a reviewer model is configured.
+ * 2. Builds system and user prompts.
+ * 3. Calls the model client.
+ * 4. Parses and validates the raw response.
+ *
+ * @throws If the reviewer model is not configured.
+ * @throws If the model response is invalid JSON or does not satisfy the
+ *         {@link ReviewGateResult} schema.
+ *
+ * @param params.config - The resolved review gate configuration.
+ * @param params.reviewContext - The pre-assembled review context.
+ * @param params.modelClient - The model client used to invoke the reviewer.
+ * @param params.signal - Optional `AbortSignal` to cancel the request.
+ * @returns A fully validated `ReviewGateResult`.
+ */
+export async function runReviewer(params: {
+  config: ReviewGateConfig;
+  reviewContext: ReviewContext;
+  modelClient: ModelClient;
+  signal?: AbortSignal;
+}): Promise<ReviewGateResult> {
+  const { config, reviewContext, modelClient, signal } = params;
+
+  if (config.reviewerModel === null) {
+    throw new Error("Reviewer model is not configured.");
+  }
+
+  const systemPrompt = buildReviewerSystemPrompt();
+  const userPrompt = buildReviewerUserPrompt(reviewContext);
+
+  const rawResponse = await modelClient.complete({
+    systemPrompt,
+    userPrompt,
+    model: config.reviewerModel,
+    signal,
+    timeoutMs: config.reviewer.timeoutMs,
+  });
+
+  const parsed = safeParseReviewGateResult(rawResponse);
+
+  if (!parsed.ok) {
+    throw new Error(`Invalid reviewer response: ${parsed.error}`);
+  }
+
+  return parsed.value;
 }
