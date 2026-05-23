@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { CORRECTION_REQUEST_MARKER } from "../src/constants.js";
-import { createRuntimeState, isReviewGateInjectedText, updateCycleState } from "../src/state.js";
+import {
+  beginReview,
+  createRuntimeState,
+  endReview,
+  isReviewActive,
+  isReviewGateInjectedText,
+  updateCycleState,
+  withActiveReviewGuard,
+} from "../src/state.js";
 import { hashText } from "../src/utils.js";
 
 describe("createRuntimeState", () => {
@@ -239,5 +247,211 @@ fix this`,
     });
     // State should be mutated, not replaced
     expect(state.correctionCycle).toBe(0);
+  });
+});
+
+describe("active review helpers", () => {
+  describe("isReviewActive", () => {
+    it("returns false in the initial state", () => {
+      const state = createRuntimeState();
+      expect(isReviewActive(state)).toBe(false);
+    });
+
+    it("returns true when state.activeReview is true", () => {
+      const state = createRuntimeState();
+      state.activeReview = true;
+      expect(isReviewActive(state)).toBe(true);
+    });
+
+    it("does not mutate the state", () => {
+      const state = createRuntimeState();
+      state.activeReview = true;
+      expect(state.correctionCycle).toBe(0);
+      expect(state.lastOriginalUserPromptHash).toBeNull();
+      expect(state.lastReviewResult).toBeNull();
+      isReviewActive(state);
+      expect(state.activeReview).toBe(true);
+      expect(state.correctionCycle).toBe(0);
+      expect(state.lastOriginalUserPromptHash).toBeNull();
+      expect(state.lastReviewResult).toBeNull();
+    });
+  });
+
+  describe("beginReview", () => {
+    it("returns true and sets activeReview to true when no review is active", () => {
+      const state = createRuntimeState();
+      expect(beginReview(state)).toBe(true);
+      expect(state.activeReview).toBe(true);
+    });
+
+    it("returns false and keeps activeReview true when review is already active", () => {
+      const state = createRuntimeState();
+      state.activeReview = true;
+      expect(beginReview(state)).toBe(false);
+      expect(state.activeReview).toBe(true);
+    });
+
+    it("does not alter correctionCycle", () => {
+      const state = createRuntimeState();
+      state.correctionCycle = 3;
+      beginReview(state);
+      expect(state.correctionCycle).toBe(3);
+    });
+
+    it("does not alter lastOriginalUserPromptHash", () => {
+      const state = createRuntimeState();
+      state.lastOriginalUserPromptHash = "abc123";
+      beginReview(state);
+      expect(state.lastOriginalUserPromptHash).toBe("abc123");
+    });
+
+    it("does not alter lastReviewResult", () => {
+      const state = createRuntimeState();
+      state.lastReviewResult = {
+        approved: false,
+        severity: "major" as const,
+        summary: "test",
+        requiredCorrections: [],
+        recommendedCorrections: [],
+        evidence: [],
+        confidence: "high" as const,
+      };
+      beginReview(state);
+      expect(state.lastReviewResult).toEqual({
+        approved: false,
+        severity: "major",
+        summary: "test",
+        requiredCorrections: [],
+        recommendedCorrections: [],
+        evidence: [],
+        confidence: "high",
+      });
+    });
+  });
+
+  describe("endReview", () => {
+    it("sets activeReview to false", () => {
+      const state = createRuntimeState();
+      state.activeReview = true;
+      endReview(state);
+      expect(state.activeReview).toBe(false);
+    });
+
+    it("is idempotent when activeReview is already false", () => {
+      const state = createRuntimeState();
+      endReview(state);
+      expect(state.activeReview).toBe(false);
+      endReview(state);
+      expect(state.activeReview).toBe(false);
+    });
+
+    it("does not alter correctionCycle", () => {
+      const state = createRuntimeState();
+      state.correctionCycle = 5;
+      state.activeReview = true;
+      endReview(state);
+      expect(state.correctionCycle).toBe(5);
+    });
+
+    it("does not alter lastOriginalUserPromptHash", () => {
+      const state = createRuntimeState();
+      state.lastOriginalUserPromptHash = "xyz789";
+      state.activeReview = true;
+      endReview(state);
+      expect(state.lastOriginalUserPromptHash).toBe("xyz789");
+    });
+
+    it("does not alter lastReviewResult", () => {
+      const state = createRuntimeState();
+      state.lastReviewResult = {
+        approved: true,
+        severity: "pass" as const,
+        summary: "all clear",
+        requiredCorrections: [],
+        recommendedCorrections: [],
+        evidence: [],
+        confidence: "high" as const,
+      };
+      state.activeReview = true;
+      endReview(state);
+      expect(state.lastReviewResult).toEqual({
+        approved: true,
+        severity: "pass",
+        summary: "all clear",
+        requiredCorrections: [],
+        recommendedCorrections: [],
+        evidence: [],
+        confidence: "high",
+      });
+    });
+  });
+
+  describe("withActiveReviewGuard", () => {
+    it("executes callback when no review is active", () => {
+      const state = createRuntimeState();
+      let called = false;
+      withActiveReviewGuard(state, () => {
+        called = true;
+      });
+      expect(called).toBe(true);
+    });
+
+    it("returns the callback value", () => {
+      const state = createRuntimeState();
+      const result = withActiveReviewGuard(state, () => "done");
+      expect(result).toBe("done");
+    });
+
+    it("sets activeReview to true during callback execution", () => {
+      const state = createRuntimeState();
+      withActiveReviewGuard(state, () => {
+        expect(state.activeReview).toBe(true);
+      });
+    });
+
+    it("releases activeReview after callback completes", () => {
+      const state = createRuntimeState();
+      withActiveReviewGuard(state, () => {
+        /* no-op */
+      });
+      expect(state.activeReview).toBe(false);
+    });
+
+    it("returns null when review is already active", () => {
+      const state = createRuntimeState();
+      state.activeReview = true;
+      const result = withActiveReviewGuard(state, () => "should not run");
+      expect(result).toBeNull();
+    });
+
+    it("does not execute callback when review is already active", () => {
+      const state = createRuntimeState();
+      state.activeReview = true;
+      let called = false;
+      withActiveReviewGuard(state, () => {
+        called = true;
+      });
+      expect(called).toBe(false);
+    });
+
+    it("releases activeReview even when callback throws", () => {
+      const state = createRuntimeState();
+      expect(() =>
+        withActiveReviewGuard(state, () => {
+          throw new Error("boom");
+        }),
+      ).toThrow("boom");
+      expect(state.activeReview).toBe(false);
+    });
+
+    it("propagates the error from callback", () => {
+      const state = createRuntimeState();
+      const error = new Error("callback failure");
+      expect(() =>
+        withActiveReviewGuard(state, () => {
+          throw error;
+        }),
+      ).toThrow(error);
+    });
   });
 });

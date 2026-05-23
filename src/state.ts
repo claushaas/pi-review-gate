@@ -44,3 +44,30 @@ export function updateCycleState(params: {
     lastOriginalUserPromptHash: state.lastOriginalUserPromptHash,
   };
 }
+
+export function isReviewActive(state: RuntimeState): boolean {
+  return state.activeReview;
+}
+
+export function beginReview(state: RuntimeState): boolean {
+  if (state.activeReview) {
+    return false;
+  }
+  state.activeReview = true;
+  return true;
+}
+
+export function endReview(state: RuntimeState): void {
+  state.activeReview = false;
+}
+
+export function withActiveReviewGuard<T>(state: RuntimeState, callback: () => T): T | null {
+  if (!beginReview(state)) {
+    return null;
+  }
+  try {
+    return callback();
+  } finally {
+    endReview(state);
+  }
+}
