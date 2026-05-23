@@ -112,3 +112,113 @@ export function serializeMessages(messages: unknown[]): string {
     })
     .join("\n\n");
 }
+
+// ---- Entry helpers for serializeSessionEntries ----
+
+function getEntryType(entry: unknown): string {
+  if (!isRecord(entry) || typeof entry.type !== "string" || entry.type.length === 0) {
+    return "unknown";
+  }
+  return entry.type;
+}
+
+function getEntryMessage(entry: unknown): unknown | null {
+  if (!isRecord(entry) || !isRecord(entry.message)) {
+    return null;
+  }
+  return entry.message;
+}
+
+function getStringField(value: unknown, field: string): string | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const fieldValue = value[field];
+  if (typeof fieldValue !== "string" || fieldValue.length === 0) {
+    return null;
+  }
+  return fieldValue;
+}
+
+function getBooleanField(value: unknown, field: string): boolean | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const fieldValue = value[field];
+  if (typeof fieldValue !== "boolean") {
+    return null;
+  }
+  return fieldValue;
+}
+
+function getEntryRole(entry: unknown): string | null {
+  const message = getEntryMessage(entry);
+  return getStringField(message, "role") ?? getStringField(entry, "role");
+}
+
+function getEntryCustomType(entry: unknown): string | null {
+  return getStringField(entry, "customType");
+}
+
+function getEntryToolName(entry: unknown): string | null {
+  const message = getEntryMessage(entry);
+  return (
+    getStringField(message, "toolName") ??
+    getStringField(message, "tool") ??
+    getStringField(entry, "toolName") ??
+    getStringField(entry, "tool")
+  );
+}
+
+function getEntryIsError(entry: unknown): boolean | null {
+  const message = getEntryMessage(entry);
+  return getBooleanField(message, "isError") ?? getBooleanField(entry, "isError");
+}
+
+/**
+ * Serializes an array of session entries into a stable, human-readable
+ * block format.
+ *
+ * Each entry is rendered as an `[entry N]` block with type, optional
+ * role, optional customType, optional tool name, optional error flag,
+ * and textual content extracted via {@link getMessageText}.
+ * Blocks are separated by a single blank line.
+ *
+ * Returns an empty string for an empty array. Never throws.
+ */
+export function serializeSessionEntries(entries: unknown[]): string {
+  if (entries.length === 0) {
+    return "";
+  }
+
+  return entries
+    .map((entry, index) => {
+      const lines = [`[entry ${index + 1}]`, `type: ${getEntryType(entry)}`];
+
+      const role = getEntryRole(entry);
+      if (role !== null) {
+        lines.push(`role: ${role}`);
+      }
+
+      const customType = getEntryCustomType(entry);
+      if (customType !== null) {
+        lines.push(`customType: ${customType}`);
+      }
+
+      const toolName = getEntryToolName(entry);
+      if (toolName !== null) {
+        lines.push(`tool: ${toolName}`);
+      }
+
+      const isError = getEntryIsError(entry);
+      if (isError !== null) {
+        lines.push(`isError: ${String(isError)}`);
+      }
+
+      lines.push("content:");
+      lines.push(getMessageText(entry));
+
+      return lines.join("\n");
+    })
+    .join("\n\n");
+}

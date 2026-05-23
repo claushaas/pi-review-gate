@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { getMessageText, serializeMessages } from "../src/serialization.js";
+import {
+  getMessageText,
+  serializeMessages,
+  serializeSessionEntries,
+} from "../src/serialization.js";
 
 describe("getMessageText", () => {
   describe("invalid values", () => {
@@ -482,6 +486,465 @@ done`);
       const before = JSON.stringify(messages);
       serializeMessages(messages);
       expect(JSON.stringify(messages)).toBe(before);
+    });
+  });
+});
+
+describe("serializeSessionEntries", () => {
+  describe("empty array", () => {
+    it("returns an empty string for an empty array", () => {
+      expect(serializeSessionEntries([])).toBe("");
+    });
+  });
+
+  describe("simple message entry", () => {
+    it("serializes a user message entry with type, role, and content", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            message: {
+              role: "user",
+              content: "hello",
+            },
+          },
+        ]),
+      ).toBe(`[entry 1]
+type: message
+role: user
+content:
+hello`);
+    });
+
+    it("serializes an assistant message entry", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            message: {
+              role: "assistant",
+              content: "done",
+            },
+          },
+        ]),
+      ).toBe(`[entry 1]
+type: message
+role: assistant
+content:
+done`);
+    });
+
+    it("numbers the first entry as [entry 1]", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            message: { role: "user", content: "first" },
+          },
+        ]),
+      ).toMatch(/^\[entry 1\]/);
+    });
+  });
+
+  describe("multiple entries", () => {
+    it("generates [entry 1], [entry 2], [entry 3] blocks", () => {
+      const result = serializeSessionEntries([
+        { type: "message", message: { role: "user", content: "a" } },
+        { type: "message", message: { role: "assistant", content: "b" } },
+        { type: "message", message: { role: "user", content: "c" } },
+      ]);
+
+      expect(result).toBe(
+        "[entry 1]\ntype: message\nrole: user\ncontent:\na\n\n" +
+          "[entry 2]\ntype: message\nrole: assistant\ncontent:\nb\n\n" +
+          "[entry 3]\ntype: message\nrole: user\ncontent:\nc",
+      );
+    });
+
+    it("separates blocks with a single blank line", () => {
+      const result = serializeSessionEntries([
+        { type: "message", message: { role: "user", content: "hello" } },
+        { type: "message", message: { role: "assistant", content: "done" } },
+      ]);
+
+      expect(result).toBe(
+        "[entry 1]\ntype: message\nrole: user\ncontent:\nhello\n\n" +
+          "[entry 2]\ntype: message\nrole: assistant\ncontent:\ndone",
+      );
+    });
+
+    it("preserves the original order", () => {
+      const entries: unknown[] = [
+        { type: "message", message: { role: "user", content: "q1" } },
+        { type: "message", message: { role: "assistant", content: "a1" } },
+        { type: "message", message: { role: "user", content: "q2" } },
+      ];
+
+      const result = serializeSessionEntries(entries);
+      const indexQ1 = result.indexOf("q1");
+      const indexA1 = result.indexOf("a1");
+      const indexQ2 = result.indexOf("q2");
+
+      expect(indexQ1).toBeLessThan(indexA1);
+      expect(indexA1).toBeLessThan(indexQ2);
+    });
+  });
+
+  describe("type", () => {
+    it("uses entry.type when it is a string", () => {
+      expect(
+        serializeSessionEntries([{ type: "custom", customType: "event", data: {} }]),
+      ).toContain("type: custom");
+    });
+
+    it("uses type: unknown when type is absent", () => {
+      expect(serializeSessionEntries([{}])).toContain("type: unknown");
+    });
+
+    it("uses type: unknown when type is not a string", () => {
+      expect(serializeSessionEntries([{ type: 42 }])).toContain("type: unknown");
+    });
+
+    it("uses type: unknown when type is an empty string", () => {
+      expect(serializeSessionEntries([{ type: "" }])).toContain("type: unknown");
+    });
+  });
+
+  describe("role", () => {
+    it("includes role from entry.message.role", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            message: { role: "user", content: "hello" },
+          },
+        ]),
+      ).toContain("role: user");
+    });
+
+    it("falls back to entry.role when entry.message.role is absent", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            role: "assistant",
+            message: { content: "done" },
+          },
+        ]),
+      ).toContain("role: assistant");
+    });
+
+    it("omits role: when absent", () => {
+      expect(serializeSessionEntries([{ type: "custom", data: {} }])).not.toContain("role:");
+    });
+
+    it("omits role: when role is not a string", () => {
+      expect(
+        serializeSessionEntries([{ type: "message", role: 42, content: "hello" }]),
+      ).not.toContain("role:");
+    });
+
+    it("omits role: when role is an empty string", () => {
+      expect(
+        serializeSessionEntries([{ type: "message", role: "", content: "hello" }]),
+      ).not.toContain("role:");
+    });
+  });
+
+  describe("customType", () => {
+    it("includes customType when entry.customType is a non-empty string", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "custom",
+            customType: "pi-review-gate-result",
+            data: { approved: true },
+          },
+        ]),
+      ).toContain("customType: pi-review-gate-result");
+    });
+
+    it("serializes custom entry without adding role noise", () => {
+      const result = serializeSessionEntries([
+        {
+          type: "custom",
+          customType: "pi-review-gate-result",
+          data: { approved: true },
+        },
+      ]);
+
+      expect(result).not.toContain("role:");
+    });
+
+    it("omits customType when absent", () => {
+      expect(serializeSessionEntries([{ type: "custom", data: {} }])).not.toContain("customType:");
+    });
+
+    it("omits customType when not a string", () => {
+      expect(
+        serializeSessionEntries([{ type: "custom", customType: 123, data: {} }]),
+      ).not.toContain("customType:");
+    });
+
+    it("omits customType when empty string", () => {
+      expect(serializeSessionEntries([{ type: "custom", customType: "", data: {} }])).not.toContain(
+        "customType:",
+      );
+    });
+  });
+
+  describe("tool metadata", () => {
+    it("includes tool: bash when entry.message.toolName is bash", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              toolName: "bash",
+              isError: false,
+              content: [{ type: "text", text: "ok" }],
+            },
+          },
+        ]),
+      ).toContain("tool: bash");
+    });
+
+    it("includes tool: bash when entry.message.tool is bash", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              tool: "bash",
+              content: [{ type: "text", text: "ok" }],
+            },
+          },
+        ]),
+      ).toContain("tool: bash");
+    });
+
+    it("falls back to entry.toolName", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            toolName: "bash",
+            message: {
+              role: "toolResult",
+              content: [{ type: "text", text: "ok" }],
+            },
+          },
+        ]),
+      ).toContain("tool: bash");
+    });
+
+    it("falls back to entry.tool", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            tool: "bash",
+            message: {
+              role: "toolResult",
+              content: [{ type: "text", text: "ok" }],
+            },
+          },
+        ]),
+      ).toContain("tool: bash");
+    });
+
+    it("prefers entry.message.toolName over the other fields", () => {
+      const result = serializeSessionEntries([
+        {
+          type: "message",
+          toolName: "entryToolName",
+          tool: "entryTool",
+          message: {
+            role: "toolResult",
+            toolName: "msgToolName",
+            tool: "msgTool",
+            content: [{ type: "text", text: "ok" }],
+          },
+        },
+      ]);
+
+      expect(result).toContain("tool: msgToolName");
+    });
+
+    it("omits tool: when absent", () => {
+      expect(
+        serializeSessionEntries([{ type: "message", message: { role: "user", content: "hello" } }]),
+      ).not.toContain("tool:");
+    });
+
+    it("omits tool: when the value is not a string", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              toolName: 123,
+              content: "result",
+            },
+          },
+        ]),
+      ).not.toContain("tool:");
+    });
+  });
+
+  describe("error metadata", () => {
+    it("includes isError: true when entry.message.isError is true", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              toolName: "bash",
+              isError: true,
+              content: "error output",
+            },
+          },
+        ]),
+      ).toContain("isError: true");
+    });
+
+    it("includes isError: false when entry.message.isError is false", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              toolName: "bash",
+              isError: false,
+              content: "ok",
+            },
+          },
+        ]),
+      ).toContain("isError: false");
+    });
+
+    it("falls back to entry.isError", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            isError: true,
+            message: {
+              role: "toolResult",
+              content: [{ type: "text", text: "error" }],
+            },
+          },
+        ]),
+      ).toContain("isError: true");
+    });
+
+    it("omits isError: when absent", () => {
+      expect(
+        serializeSessionEntries([{ type: "message", message: { role: "user", content: "hello" } }]),
+      ).not.toContain("isError:");
+    });
+
+    it("omits isError: when not a boolean", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              isError: "yes",
+              content: "ok",
+            },
+          },
+        ]),
+      ).not.toContain("isError:");
+    });
+  });
+
+  describe("content", () => {
+    it("uses getMessageText to extract content", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            message: {
+              role: "toolResult",
+              content: [{ type: "text", text: "output" }],
+            },
+          },
+        ]),
+      ).toContain("content:\noutput");
+    });
+
+    it("preserves multiline content", () => {
+      expect(
+        serializeSessionEntries([
+          {
+            type: "message",
+            message: {
+              role: "user",
+              content: "line1\nline2\nline3",
+            },
+          },
+        ]),
+      ).toContain("content:\nline1\nline2\nline3");
+    });
+
+    it("represents absent content with content: followed by an empty string", () => {
+      const result = serializeSessionEntries([
+        {
+          type: "message",
+          message: { role: "assistant" },
+        },
+      ]);
+      expect(result).toContain("content:\n");
+    });
+
+    it("ignores non-textual content without throwing", () => {
+      expect(() =>
+        serializeSessionEntries([
+          {
+            type: "message",
+            message: {
+              role: "user",
+              content: [{ type: "image", source: { type: "base64", data: "abc" } }],
+            },
+          },
+        ]),
+      ).not.toThrow();
+    });
+  });
+
+  describe("tolerance", () => {
+    it("does not throw for unknown entry formats", () => {
+      expect(() => serializeSessionEntries([{ unknown: "format" }])).not.toThrow();
+    });
+
+    it("does not throw when an entry is not an object", () => {
+      expect(() => serializeSessionEntries(["not an object" as unknown])).not.toThrow();
+    });
+
+    it("does not throw for null entries", () => {
+      expect(() => serializeSessionEntries([null as unknown])).not.toThrow();
+    });
+
+    it("does not mutate input entries", () => {
+      const entries: unknown[] = [
+        {
+          type: "message",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "hello" }],
+          },
+        },
+      ];
+      const before = JSON.stringify(entries);
+      serializeSessionEntries(entries);
+      expect(JSON.stringify(entries)).toBe(before);
     });
   });
 });
