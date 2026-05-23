@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { CORRECTION_REQUEST_MARKER } from "../src/constants.js";
 import { buildCorrectionFollowUp } from "../src/follow-up.js";
@@ -112,5 +114,35 @@ describe("buildCorrectionFollowUp", () => {
     expect(followUp).not.toContain("sendUserMessage");
     expect(followUp).not.toContain("appendEntry");
     expect(followUp).not.toContain("agent_end");
+  });
+});
+
+describe("follow-up module boundaries", () => {
+  it("does not import or call Pi runtime APIs", () => {
+    const source = readFileSync(join(process.cwd(), "src", "follow-up.ts"), "utf8");
+    expect(source).not.toContain("@earendil-works/pi-coding-agent");
+    expect(source).not.toContain("sendUserMessage");
+    expect(source).not.toContain("appendEntry");
+    expect(source).not.toContain("agent_end");
+    expect(source).not.toContain("pi.on");
+    expect(source).not.toContain("registerCommand");
+  });
+
+  it("does not import reviewer, config, or runtime modules", () => {
+    const source = readFileSync(join(process.cwd(), "src", "follow-up.ts"), "utf8");
+    expect(source).not.toMatch(/from\s+"\.\/reviewer/);
+    expect(source).not.toMatch(/from\s+"\.\/config/);
+    expect(source).not.toMatch(/from\s+"\.\/git/);
+    expect(source).not.toMatch(/from\s+"\.\/model/);
+    expect(source).not.toMatch(/from\s+"\.\/commands/);
+  });
+
+  it("does not control correction cycles or decide block/warn mode", () => {
+    const source = readFileSync(join(process.cwd(), "src", "follow-up.ts"), "utf8");
+    expect(source).not.toContain("maxCorrectionCycles");
+    expect(source).not.toContain('"block"');
+    expect(source).not.toContain('"warn"');
+    expect(source).not.toMatch(/\bmode\b.*===.*"block"/);
+    expect(source).not.toMatch(/\bmode\b.*===.*"warn"/);
   });
 });
