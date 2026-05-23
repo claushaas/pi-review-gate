@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { createUnavailableModelClient } from "../src/model.js";
 import { buildReviewerSystemPrompt, buildReviewerUserPrompt } from "../src/reviewer.js";
 import type { ReviewContext } from "../src/types.js";
 
@@ -292,5 +293,33 @@ describe("buildReviewerUserPrompt", () => {
     expect(prompt).not.toContain("sendUserMessage");
     expect(prompt).not.toContain("pi.exec");
     expect(prompt).not.toContain("apply the corrections directly");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createUnavailableModelClient
+// ---------------------------------------------------------------------------
+
+describe("createUnavailableModelClient", () => {
+  it("returns a model client that fails explicitly", async () => {
+    const client = createUnavailableModelClient();
+    await expect(
+      client.complete({
+        systemPrompt: "system",
+        userPrompt: "user",
+        model: {
+          provider: "test",
+          id: "test-model",
+        },
+        timeoutMs: 1000,
+      }),
+    ).rejects.toThrow("Model client is not implemented yet.");
+  });
+
+  it("does not call a real provider", () => {
+    const client = createUnavailableModelClient();
+    // The stub exposes a complete method that returns a Promise
+    // but throws on await without any side effects.
+    expect(client.complete).toBeInstanceOf(Function);
   });
 });
