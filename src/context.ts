@@ -1,5 +1,6 @@
-import { getMessageText } from "./serialization.js";
+import { getMessageText, serializeMessages, serializeSessionEntries } from "./serialization.js";
 import { isReviewGateInjectedText } from "./state.js";
+import type { GitContext, ReviewContext, ReviewGateConfig } from "./types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -129,4 +130,46 @@ export function collectSessionSliceSinceLastRealUserMessage(params: {
   }
 
   return branch.slice(lastRealUserIndex).slice(-maxEntries);
+}
+
+/**
+ * Assembles a deterministic {@link ReviewContext} from event messages,
+ * an optional session branch, the review-gate configuration, and a
+ * pre-collected {@link GitContext}.
+ *
+ * - `eventMessages` is the primary source of context.
+ * - `branch` is an optional session branch used only when
+ *   `config.context.includeSessionSlice` is `true`.
+ * - `gitContext` values are copied as-is; no Git collection is performed.
+ *
+ * Never throws. Does not mutate any input.
+ */
+export function buildReviewContext(params: {
+  eventMessages: unknown[];
+  branch?: unknown[];
+  config: ReviewGateConfig;
+  gitContext: GitContext;
+}): ReviewContext {
+  const { eventMessages, branch, config, gitContext } = params;
+
+  const sessionSlice =
+    config.context.includeSessionSlice && branch
+      ? collectSessionSliceSinceLastRealUserMessage({
+          branch,
+          maxEntries: config.context.maxSessionEntries,
+        })
+      : [];
+
+  return {
+    currentUserPrompt: extractCurrentUserPrompt(eventMessages),
+    serializedEventMessages: config.context.includeEventMessages
+      ? serializeMessages(eventMessages)
+      : "",
+    latestAssistantResponse: extractLatestAssistantResponse(eventMessages),
+    serializedSessionSlice: sessionSlice.length > 0 ? serializeSessionEntries(sessionSlice) : null,
+    gitStatus: gitContext.status,
+    gitDiffStat: gitContext.diffStat,
+    gitDiff: gitContext.diff,
+    gitUnavailableReason: gitContext.unavailableReason,
+  };
 }

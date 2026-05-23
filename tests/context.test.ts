@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { defaultConfig } from "../src/config.js";
 import { CORRECTION_REQUEST_MARKER } from "../src/constants.js";
 import {
+  buildReviewContext,
   collectSessionSliceSinceLastRealUserMessage,
   extractCurrentUserPrompt,
   extractLatestAssistantResponse,
@@ -384,5 +386,282 @@ describe("collectSessionSliceSinceLastRealUserMessage", () => {
         maxEntries: 40,
       }),
     ).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildReviewContext
+// ---------------------------------------------------------------------------
+
+describe("buildReviewContext", () => {
+  const gitContext = {
+    status: " M src/context.ts",
+    diffStat: " src/context.ts | 10 ++++++++++",
+    diff: "diff --git a/src/context.ts b/src/context.ts",
+  };
+
+  it("builds review context from event messages and git context", () => {
+    const eventMessages = [
+      { role: "user", content: "implement step 8.3" },
+      { role: "assistant", content: "done" },
+    ];
+
+    const context = buildReviewContext({
+      eventMessages,
+      config: defaultConfig,
+      gitContext,
+    });
+
+    expect(context.currentUserPrompt).toBe("implement step 8.3");
+    expect(context.latestAssistantResponse).toBe("done");
+    expect(context.serializedEventMessages).toContain("[message 1]");
+    expect(context.serializedEventMessages).toContain("role: user");
+    expect(context.gitStatus).toBe(gitContext.status);
+    expect(context.gitDiffStat).toBe(gitContext.diffStat);
+    expect(context.gitDiff).toBe(gitContext.diff);
+  });
+
+  it("omits serialized event messages when disabled", () => {
+    const config = {
+      ...defaultConfig,
+      context: {
+        ...defaultConfig.context,
+        includeEventMessages: false,
+      },
+    };
+
+    const context = buildReviewContext({
+      eventMessages: [{ role: "user", content: "prompt" }],
+      config,
+      gitContext: { status: null, diffStat: null, diff: null },
+    });
+
+    expect(context.serializedEventMessages).toBe("");
+  });
+
+  it("includes session slice when enabled and branch is provided", () => {
+    const branch = [
+      { type: "message", message: { role: "user", content: "real prompt" } },
+      { type: "message", message: { role: "assistant", content: "answer" } },
+    ];
+
+    const context = buildReviewContext({
+      eventMessages: [{ role: "user", content: "current prompt" }],
+      branch,
+      config: defaultConfig,
+      gitContext: { status: null, diffStat: null, diff: null },
+    });
+
+    expect(context.serializedSessionSlice).toContain("[entry 1]");
+    expect(context.serializedSessionSlice).toContain("real prompt");
+  });
+
+  it("uses serializedSessionSlice null when includeSessionSlice is false", () => {
+    const config = {
+      ...defaultConfig,
+      context: {
+        ...defaultConfig.context,
+        includeSessionSlice: false,
+      },
+    };
+
+    const branch = [{ type: "message", message: { role: "user", content: "real prompt" } }];
+
+    const context = buildReviewContext({
+      eventMessages: [{ role: "user", content: "current prompt" }],
+      branch,
+      config,
+      gitContext: { status: null, diffStat: null, diff: null },
+    });
+
+    expect(context.serializedSessionSlice).toBeNull();
+  });
+
+  it("uses serializedSessionSlice null when branch is not provided", () => {
+    const context = buildReviewContext({
+      eventMessages: [{ role: "user", content: "current prompt" }],
+      config: defaultConfig,
+      gitContext: { status: null, diffStat: null, diff: null },
+    });
+
+    expect(context.serializedSessionSlice).toBeNull();
+  });
+
+  it("uses serializedSessionSlice null when branch has no real user message", () => {
+    const branch = [{ type: "message", message: { role: "assistant", content: "answer" } }];
+
+    const context = buildReviewContext({
+      eventMessages: [{ role: "user", content: "current prompt" }],
+      branch,
+      config: defaultConfig,
+      gitContext: { status: null, diffStat: null, diff: null },
+    });
+
+    expect(context.serializedSessionSlice).toBeNull();
+  });
+
+  it("respects maxSessionEntries", () => {
+    const config = {
+      ...defaultConfig,
+      context: {
+        ...defaultConfig.context,
+        includeSessionSlice: true,
+        maxSessionEntries: 2,
+      },
+    };
+
+    const branch = [
+      { type: "message", message: { role: "user", content: "real prompt" } },
+      { type: "message", message: { role: "assistant", content: "a" } },
+      { type: "custom", customType: "x" },
+      { type: "message", message: { role: "assistant", content: "b" } },
+    ];
+
+    const context = buildReviewContext({
+      eventMessages: [{ role: "user", content: "current prompt" }],
+      branch,
+      config,
+      gitContext: { status: null, diffStat: null, diff: null },
+    });
+
+    // Should contain only the last 2 entries
+    expect(context.serializedSessionSlice).toContain("[entry 1]");
+    expect(context.serializedSessionSlice).toContain("[entry 2]");
+    expect(context.serializedSessionSlice).not.toContain("[entry 3]");
+  });
+
+  it("does not let injected prompts define the session slice start", () => {
+    const branch = [
+      { type: "message", message: { role: "user", content: "real prompt" } },
+      { type: "message", message: { role: "assistant", content: "answer" } },
+      {
+        type: "message",
+        message: {
+          role: "user",
+          content: `${CORRECTION_REQUEST_MARKER}\nMandatory review failed.`,
+        },
+      },
+      { type: "message", message: { role: "assistant", content: "correction" } },
+    ];
+
+    const context = buildReviewContext({
+      eventMessages: [{ role: "user", content: "current prompt" }],
+      branch,
+      config: defaultConfig,
+      gitContext: { status: null, diffStat: null, diff: null },
+    });
+
+    expect(context.serializedSessionSlice).toContain("real prompt");
+    expect(context.serializedSessionSlice).toContain("correction");
+  });
+
+  it("copies gitStatus, gitDiffStat, and gitDiff from gitContext", () => {
+    const context = buildReviewContext({
+      eventMessages: [{ role: "user", content: "prompt" }],
+      config: defaultConfig,
+      gitContext,
+    });
+
+    expect(context.gitStatus).toBe(gitContext.status);
+    expect(context.gitDiffStat).toBe(gitContext.diffStat);
+    expect(context.gitDiff).toBe(gitContext.diff);
+  });
+
+  it("copies gitUnavailableReason when present", () => {
+    const context = buildReviewContext({
+      eventMessages: [{ role: "user", content: "prompt" }],
+      config: defaultConfig,
+      gitContext: {
+        status: null,
+        diffStat: null,
+        diff: null,
+        unavailableReason: "Git context unavailable: current directory is not a git repository.",
+      },
+    });
+
+    expect(context.gitStatus).toBeNull();
+    expect(context.gitDiffStat).toBeNull();
+    expect(context.gitDiff).toBeNull();
+    expect(context.gitUnavailableReason).toBe(
+      "Git context unavailable: current directory is not a git repository.",
+    );
+  });
+
+  it("accepts Git unavailable with all fields null", () => {
+    const context = buildReviewContext({
+      eventMessages: [{ role: "user", content: "prompt" }],
+      config: defaultConfig,
+      gitContext: {
+        status: null,
+        diffStat: null,
+        diff: null,
+      },
+    });
+
+    expect(context.gitStatus).toBeNull();
+    expect(context.gitDiffStat).toBeNull();
+    expect(context.gitDiff).toBeNull();
+    expect(context.gitUnavailableReason).toBeUndefined();
+  });
+
+  it("does not mutate eventMessages", () => {
+    const eventMessages = [
+      { role: "user", content: "prompt" },
+      { role: "assistant", content: "done" },
+    ];
+    const before = JSON.stringify(eventMessages);
+
+    buildReviewContext({
+      eventMessages,
+      config: defaultConfig,
+      gitContext: { status: null, diffStat: null, diff: null },
+    });
+
+    expect(JSON.stringify(eventMessages)).toBe(before);
+  });
+
+  it("does not mutate branch", () => {
+    const branch = [{ type: "message", message: { role: "user", content: "branch prompt" } }];
+    const before = JSON.stringify(branch);
+
+    buildReviewContext({
+      eventMessages: [{ role: "user", content: "prompt" }],
+      branch,
+      config: defaultConfig,
+      gitContext: { status: null, diffStat: null, diff: null },
+    });
+
+    expect(JSON.stringify(branch)).toBe(before);
+  });
+
+  it("does not mutate config", () => {
+    const config: typeof defaultConfig = JSON.parse(JSON.stringify(defaultConfig));
+    const before = JSON.stringify(config);
+
+    buildReviewContext({
+      eventMessages: [{ role: "user", content: "prompt" }],
+      config,
+      gitContext: { status: null, diffStat: null, diff: null },
+    });
+
+    expect(JSON.stringify(config)).toBe(before);
+  });
+
+  it("does not mutate gitContext", () => {
+    const ctx = {
+      status: " M file.ts",
+      diffStat: "file.ts | 1 +",
+      diff: "diff",
+      unavailableReason: undefined as string | undefined,
+    };
+    const before = JSON.stringify(ctx);
+
+    buildReviewContext({
+      eventMessages: [{ role: "user", content: "prompt" }],
+      config: defaultConfig,
+      gitContext: ctx,
+    });
+
+    expect(JSON.stringify(ctx)).toBe(before);
   });
 });
