@@ -7,6 +7,7 @@ import type {
   ReviewGateResult,
   ReviewGateUiConfig,
 } from "./types.js";
+import { classifyJsonObjectText, extractStrictJsonObjectText } from "./utils.js";
 
 // ---------------------------------------------------------------------------
 // Private helpers
@@ -172,6 +173,92 @@ export function parseReviewGateResult(value: unknown): ReviewGateResult {
   }
 
   return value as ReviewGateResult;
+}
+
+// ---------------------------------------------------------------------------
+// Safe parse (text → validated result)
+// ---------------------------------------------------------------------------
+
+export type SafeParseReviewGateResult =
+  | { ok: true; value: ReviewGateResult }
+  | { ok: false; error: string };
+
+/**
+ * Safely parses a raw text response from the reviewer model into a
+ * validated `ReviewGateResult`, handling all expected failure modes
+ * without throwing.
+ *
+ * Accepted input formats:
+ * - Direct JSON object (text starts with `{` and ends with `}`).
+ * - Single JSON code fence with optional `json` language tag.
+ *
+ * Rejected input:
+ * - Empty or whitespace-only text.
+ * - Prose, markdown, or any extra text outside the JSON / fence.
+ * - Arrays, strings, numbers, or multiple objects.
+ * - Malformed JSON or JSON that does not satisfy the `ReviewGateResult`
+ *   schema.
+ */
+export function safeParseReviewGateResult(raw: string): SafeParseReviewGateResult {
+  const trimmed = raw.trim();
+  const jsonText = extractStrictJsonObjectText(raw);
+
+  if (jsonText === null) {
+    if (trimmed.length === 0) {
+      return { ok: false, error: "Empty reviewer response." };
+    }
+
+    // If the input looks like an attempted JSON object (starts with `{`),
+    // check for extra content (prose, multiple objects) vs truly malformed
+    // JSON so we can give the right error message.
+    if (trimmed.startsWith("{")) {
+      const classification = classifyJsonObjectText(trimmed);
+      if (classification === "extra_content") {
+        return {
+          ok: false,
+          error: "Reviewer response must be a JSON object or a single JSON code fence.",
+        };
+      }
+      try {
+        JSON.parse(trimmed);
+        // Parsed successfully but wasn't accepted by extractStrictJsonObjectText.
+        // This shouldn't normally happen — fall through to generic error.
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { ok: false, error: `Invalid reviewer JSON: ${message}` };
+      }
+    }
+
+    return {
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    };
+  }
+
+  // Check for extra content (multiple objects, prose after JSON, etc.)
+  const classification = classifyJsonObjectText(jsonText);
+  if (classification === "extra_content") {
+    return {
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, error: `Invalid reviewer JSON: ${message}` };
+  }
+
+  try {
+    const value = parseReviewGateResult(parsed);
+    return { ok: true, value };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { ok: false, error: `Invalid review result: ${message}` };
+  }
 }
 
 /**

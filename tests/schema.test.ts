@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultConfig } from "../src/config.js";
-import { parseReviewGateResult, validateConfig } from "../src/schema.js";
+import { parseReviewGateResult, safeParseReviewGateResult, validateConfig } from "../src/schema.js";
 
 // ---------------------------------------------------------------------------
 // Valid config
@@ -705,5 +705,413 @@ describe("parseReviewGateResult", () => {
   it("rejects missing confidence", () => {
     const { confidence: _, ...rest } = validApprovedResult;
     expect(() => parseReviewGateResult(rest)).toThrow("reviewResult.confidence");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// safeParseReviewGateResult
+// ---------------------------------------------------------------------------
+
+const validReviewResult = {
+  approved: true,
+  severity: "pass" as const,
+  summary: "Delivery satisfies the request.",
+  requiredCorrections: [],
+  recommendedCorrections: [],
+  evidence: ["Diff matches the request."],
+  confidence: "high" as const,
+};
+
+const validRejectedReviewResult = {
+  approved: false,
+  severity: "blocking" as const,
+  summary: "Missing error handling.",
+  requiredCorrections: ["Add try/catch around the async call."],
+  recommendedCorrections: [],
+  evidence: ["Line 42 has unhandled promise rejection."],
+  confidence: "high" as const,
+};
+
+describe("safeParseReviewGateResult", () => {
+  // -----------------------------------------------------------------------
+  // Direct JSON — valid
+  // -----------------------------------------------------------------------
+
+  it("accepts direct valid JSON", () => {
+    const result = safeParseReviewGateResult(JSON.stringify(validReviewResult));
+    expect(result).toEqual({
+      ok: true,
+      value: validReviewResult,
+    });
+  });
+
+  it("accepts direct valid JSON with whitespace around it", () => {
+    const result = safeParseReviewGateResult(`  \n${JSON.stringify(validReviewResult)}\n  `);
+    expect(result).toEqual({
+      ok: true,
+      value: validReviewResult,
+    });
+  });
+
+  it("accepts direct valid rejected result", () => {
+    const result = safeParseReviewGateResult(JSON.stringify(validRejectedReviewResult));
+    expect(result).toEqual({
+      ok: true,
+      value: validRejectedReviewResult,
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Code fence — valid
+  // -----------------------------------------------------------------------
+
+  it("accepts a single json code fence", () => {
+    const result = safeParseReviewGateResult(
+      `\`\`\`json\n${JSON.stringify(validReviewResult, null, 2)}\n\`\`\``,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toEqual(validReviewResult);
+    }
+  });
+
+  it("accepts a code fence without language", () => {
+    const result = safeParseReviewGateResult(
+      `\`\`\`\n${JSON.stringify(validReviewResult)}\n\`\`\``,
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value).toEqual(validReviewResult);
+    }
+  });
+
+  it("rejects fence with language different from json", () => {
+    const result = safeParseReviewGateResult(
+      `\`\`\`yaml\n${JSON.stringify(validReviewResult)}\n\`\`\``,
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  it("rejects fence with markdown language", () => {
+    const result = safeParseReviewGateResult(
+      `\`\`\`markdown\n${JSON.stringify(validReviewResult)}\n\`\`\``,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe(
+        "Reviewer response must be a JSON object or a single JSON code fence.",
+      );
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Empty input
+  // -----------------------------------------------------------------------
+
+  it("rejects empty string", () => {
+    const result = safeParseReviewGateResult("");
+    expect(result).toEqual({
+      ok: false,
+      error: "Empty reviewer response.",
+    });
+  });
+
+  it("rejects whitespace-only string", () => {
+    const result = safeParseReviewGateResult("   \n\t  ");
+    expect(result).toEqual({
+      ok: false,
+      error: "Empty reviewer response.",
+    });
+  });
+
+  it("rejects newline-only string", () => {
+    const result = safeParseReviewGateResult("\n\n\n");
+    expect(result).toEqual({
+      ok: false,
+      error: "Empty reviewer response.",
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Prose / markdown extra
+  // -----------------------------------------------------------------------
+
+  it("rejects prose before JSON", () => {
+    const result = safeParseReviewGateResult(
+      `Here is the result:\n${JSON.stringify(validReviewResult)}`,
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  it("rejects prose after JSON", () => {
+    const result = safeParseReviewGateResult(
+      `${JSON.stringify(validReviewResult)}\nAdditional explanation.`,
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  it("rejects prose before code fence", () => {
+    const result = safeParseReviewGateResult(
+      `The review result is:\n\`\`\`json\n${JSON.stringify(validReviewResult)}\n\`\`\``,
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  it("rejects prose after code fence", () => {
+    const result = safeParseReviewGateResult(
+      `\`\`\`json\n${JSON.stringify(validReviewResult)}\n\`\`\`\nThat's the review.`,
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  it("rejects markdown with title and JSON", () => {
+    const result = safeParseReviewGateResult(`# Review\n\n${JSON.stringify(validReviewResult)}`);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe(
+        "Reviewer response must be a JSON object or a single JSON code fence.",
+      );
+    }
+  });
+
+  it("rejects markdown with list and JSON", () => {
+    const result = safeParseReviewGateResult(
+      `- Summary\n- Details\n\n${JSON.stringify(validReviewResult)}`,
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe(
+        "Reviewer response must be a JSON object or a single JSON code fence.",
+      );
+    }
+  });
+
+  // -----------------------------------------------------------------------
+  // Invalid JSON
+  // -----------------------------------------------------------------------
+
+  it("rejects malformed JSON and does not throw", () => {
+    const result = safeParseReviewGateResult("{ invalid json }");
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/^Invalid reviewer JSON:/);
+    }
+  });
+
+  it("rejects trailing comma JSON and does not throw", () => {
+    const result = safeParseReviewGateResult(`${JSON.stringify(validReviewResult).slice(0, -1)},}`);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/^Invalid reviewer JSON:/);
+    }
+  });
+
+  it("rejects unclosed brace JSON and does not throw", () => {
+    const result = safeParseReviewGateResult('{ "approved": true');
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/^Invalid reviewer JSON:/);
+    }
+  });
+
+  it("does not throw for any invalid JSON input", () => {
+    expect(() => safeParseReviewGateResult("{ invalid }")).not.toThrow();
+    expect(() => safeParseReviewGateResult("not even json")).not.toThrow();
+    expect(() => safeParseReviewGateResult("")).not.toThrow();
+    expect(() => safeParseReviewGateResult("null")).not.toThrow();
+  });
+
+  // -----------------------------------------------------------------------
+  // Schema invalid (valid JSON, invalid ReviewGateResult)
+  // -----------------------------------------------------------------------
+
+  it("rejects valid JSON with invalid severity", () => {
+    const result = safeParseReviewGateResult(
+      JSON.stringify({
+        ...validReviewResult,
+        severity: "critical",
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/^Invalid review result:/);
+    }
+  });
+
+  it("rejects valid JSON without approved", () => {
+    const { approved: _, ...rest } = validReviewResult;
+    const result = safeParseReviewGateResult(JSON.stringify(rest));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/^Invalid review result:/);
+    }
+  });
+
+  it("rejects valid JSON with requiredCorrections: [] when approved === false", () => {
+    const result = safeParseReviewGateResult(
+      JSON.stringify({
+        approved: false,
+        severity: "blocking",
+        summary: "Missing error handling.",
+        requiredCorrections: [],
+        recommendedCorrections: [],
+        evidence: ["Line 42 is problematic."],
+        confidence: "high",
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/^Invalid review result:/);
+    }
+  });
+
+  it("rejects valid JSON with empty summary", () => {
+    const result = safeParseReviewGateResult(
+      JSON.stringify({
+        ...validReviewResult,
+        summary: "",
+      }),
+    );
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toMatch(/^Invalid review result:/);
+    }
+  });
+
+  it("does not throw for any schema-invalid input", () => {
+    expect(() =>
+      safeParseReviewGateResult(JSON.stringify({ ...validReviewResult, severity: "critical" })),
+    ).not.toThrow();
+    expect(() => safeParseReviewGateResult(JSON.stringify({}))).not.toThrow();
+    expect(() => safeParseReviewGateResult(JSON.stringify({ approved: true }))).not.toThrow();
+  });
+
+  // -----------------------------------------------------------------------
+  // Top-level invalid JSON types
+  // -----------------------------------------------------------------------
+
+  it("rejects JSON array top-level", () => {
+    const result = safeParseReviewGateResult(JSON.stringify([validReviewResult]));
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  it("rejects JSON string top-level", () => {
+    const result = safeParseReviewGateResult(JSON.stringify("hello"));
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  it("rejects JSON number top-level", () => {
+    const result = safeParseReviewGateResult("42");
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  it("rejects JSON null top-level", () => {
+    const result = safeParseReviewGateResult("null");
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  it("rejects JSON boolean top-level", () => {
+    const result = safeParseReviewGateResult("true");
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Multiple JSON objects
+  // -----------------------------------------------------------------------
+
+  it("rejects multiple JSON objects", () => {
+    const result = safeParseReviewGateResult(
+      `${JSON.stringify(validReviewResult)}\n${JSON.stringify(validReviewResult)}`,
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  it("rejects two successive JSON objects on same line", () => {
+    const result = safeParseReviewGateResult(
+      `${JSON.stringify(validReviewResult)}${JSON.stringify(validReviewResult)}`,
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Code fence — malformed
+  // -----------------------------------------------------------------------
+
+  it("rejects unclosed code fence", () => {
+    const result = safeParseReviewGateResult(`\`\`\`json\n${JSON.stringify(validReviewResult)}`);
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  it("rejects code fence containing non-object JSON", () => {
+    const result = safeParseReviewGateResult(`\`\`\`json\n[1, 2, 3]\n\`\`\``);
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Edge cases
+  // -----------------------------------------------------------------------
+
+  it("rejects code fence with extra whitespace lines but no prose", () => {
+    // Extra blank lines inside a fence are part of the fenced content,
+    // so the content starts with empty line, not `{`.
+    const result = safeParseReviewGateResult(
+      `\`\`\`json\n\n${JSON.stringify(validReviewResult)}\n\`\`\``,
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
+  });
+
+  it("rejects text that looks like JSON inside a non-JSON fence", () => {
+    const result = safeParseReviewGateResult(
+      `\`\`\`python\n${JSON.stringify(validReviewResult)}\n\`\`\``,
+    );
+    expect(result).toEqual({
+      ok: false,
+      error: "Reviewer response must be a JSON object or a single JSON code fence.",
+    });
   });
 });
