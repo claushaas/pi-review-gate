@@ -99,3 +99,18 @@ export function classifyJsonObjectText(text: string): "ok" | "extra_content" | "
 
   return "unbalanced";
 }
+
+/**
+ * Produces a deterministic, non-cryptographic integer hash from a string.
+ * Uses a simple djb2 variant. The result is a hexadecimal string.
+ *
+ * This is suitable for lightweight identification of a prompt, not for
+ * security-sensitive contexts.
+ */
+export function hashText(text: string): string {
+  let hash = 5381;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 33) ^ text.charCodeAt(index);
+  }
+  return (hash >>> 0).toString(16);
+}
