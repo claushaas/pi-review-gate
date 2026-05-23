@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { createUnavailableModelClient } from "../src/model.js";
+import { describe, expect, it, vi } from "vitest";
+import { createModelClientFromContext, createUnavailableModelClient } from "../src/model.js";
 import { buildReviewerSystemPrompt, buildReviewerUserPrompt } from "../src/reviewer.js";
 import type { ReviewContext } from "../src/types.js";
 
@@ -300,6 +300,10 @@ describe("buildReviewerUserPrompt", () => {
 // createUnavailableModelClient
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// createUnavailableModelClient
+// ---------------------------------------------------------------------------
+
 describe("createUnavailableModelClient", () => {
   it("returns a model client that fails explicitly", async () => {
     const client = createUnavailableModelClient();
@@ -321,5 +325,221 @@ describe("createUnavailableModelClient", () => {
     // The stub exposes a complete method that returns a Promise
     // but throws on await without any side effects.
     expect(client.complete).toBeInstanceOf(Function);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createModelClientFromContext
+// ---------------------------------------------------------------------------
+
+const completionParams = {
+  systemPrompt: "system",
+  userPrompt: "user",
+  model: {
+    provider: "test-provider",
+    id: "test-model",
+    thinkingLevel: "high" as const,
+  },
+  timeoutMs: 1000,
+};
+
+describe("createModelClientFromContext", () => {
+  it("fails when model registry is not available", async () => {
+    const client = createModelClientFromContext({});
+    await expect(client.complete(completionParams)).rejects.toThrow(
+      "Model registry is not available.",
+    );
+  });
+
+  it("resolves a reviewer model using modelRegistry.find", async () => {
+    const complete = vi.fn(async () => "review result");
+    const getModels = vi.fn();
+    const find = vi.fn(async (provider: string, id: string) => ({
+      provider,
+      id,
+      complete,
+    }));
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find,
+        getModels,
+      },
+    });
+
+    await expect(client.complete(completionParams)).resolves.toBe("review result");
+
+    expect(find).toHaveBeenCalledWith("test-provider", "test-model");
+    expect(getModels).not.toHaveBeenCalled();
+    expect(complete).toHaveBeenCalledWith({
+      systemPrompt: "system",
+      userPrompt: "user",
+      signal: undefined,
+      timeoutMs: 1000,
+      thinkingLevel: "high",
+    });
+  });
+
+  it("resolves a reviewer model using getModels fallback", async () => {
+    const complete = vi.fn(async () => "review result");
+    const getModels = vi.fn(async () => [
+      {
+        provider: "other",
+        id: "other-model",
+        complete: vi.fn(),
+      },
+      {
+        provider: "test-provider",
+        id: "test-model",
+        complete,
+      },
+    ]);
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        getModels,
+      },
+    });
+
+    await expect(client.complete(completionParams)).resolves.toBe("review result");
+
+    expect(getModels).toHaveBeenCalled();
+    expect(complete).toHaveBeenCalled();
+  });
+
+  it("fails when reviewer model is not found via find", async () => {
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => null),
+      },
+    });
+
+    await expect(client.complete(completionParams)).rejects.toThrow(
+      "Reviewer model not found: test-provider/test-model",
+    );
+  });
+
+  it("fails when reviewer model is not found via getModels", async () => {
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        getModels: vi.fn(async () => [{ provider: "other", id: "other-model" }]),
+      },
+    });
+
+    await expect(client.complete(completionParams)).rejects.toThrow(
+      "Reviewer model not found: test-provider/test-model",
+    );
+  });
+
+  it("fails when reviewer model does not expose complete", async () => {
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+        })),
+      },
+    });
+
+    await expect(client.complete(completionParams)).rejects.toThrow(
+      "Reviewer model does not expose a complete method: test-provider/test-model",
+    );
+  });
+
+  it("fails when reviewer model returns a non-string response", async () => {
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete: vi.fn(async () => ({ invalid: true }) as unknown as string),
+        })),
+      },
+    });
+
+    await expect(client.complete(completionParams)).rejects.toThrow(
+      "Reviewer model returned a non-string response: test-provider/test-model",
+    );
+  });
+
+  it("propagates signal and timeout to the resolved model", async () => {
+    const signal = new AbortController().signal;
+    const complete = vi.fn(async () => "review result");
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await client.complete({
+      ...completionParams,
+      signal,
+      timeoutMs: 1234,
+    });
+
+    expect(complete).toHaveBeenCalledWith({
+      systemPrompt: "system",
+      userPrompt: "user",
+      signal,
+      timeoutMs: 1234,
+      thinkingLevel: "high",
+    });
+  });
+
+  it("passes thinkingLevel to the resolved model", async () => {
+    const complete = vi.fn(async () => "review result");
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await client.complete({
+      ...completionParams,
+      model: {
+        provider: "test-provider",
+        id: "test-model",
+        thinkingLevel: "off",
+      },
+    });
+
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ thinkingLevel: "off" }));
+  });
+
+  it("propagates systemPrompt and userPrompt to the resolved model", async () => {
+    const complete = vi.fn(async () => "review result");
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await client.complete({
+      ...completionParams,
+      systemPrompt: "custom system",
+      userPrompt: "custom user",
+    });
+
+    expect(complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemPrompt: "custom system",
+        userPrompt: "custom user",
+      }),
+    );
   });
 });
