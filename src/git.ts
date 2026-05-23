@@ -4,6 +4,7 @@ import {
   GIT_STATUS_TIMEOUT_MS,
 } from "./constants.js";
 import type { GitContext, ReviewGateConfig } from "./types.js";
+import { truncateWithMarker } from "./utils.js";
 
 type GitExecAPI = {
   exec(
@@ -63,30 +64,39 @@ export async function collectGitContext(params: {
 
   try {
     const status = config.git.includeStatus
-      ? ((
-          await pi.exec("git", ["status", "--short"], {
-            timeout: GIT_STATUS_TIMEOUT_MS,
-            signal,
-          })
-        ).stdout ?? "")
+      ? truncateWithMarker(
+          (
+            await pi.exec("git", ["status", "--short"], {
+              timeout: GIT_STATUS_TIMEOUT_MS,
+              signal,
+            })
+          ).stdout ?? "",
+          config.git.maxStatusChars,
+        )
       : null;
 
     const diffStat = config.git.includeDiffStat
-      ? ((
-          await pi.exec("git", ["diff", "--stat"], {
-            timeout: GIT_DIFF_STAT_TIMEOUT_MS,
-            signal,
-          })
-        ).stdout ?? "")
+      ? truncateWithMarker(
+          (
+            await pi.exec("git", ["diff", "--stat"], {
+              timeout: GIT_DIFF_STAT_TIMEOUT_MS,
+              signal,
+            })
+          ).stdout ?? "",
+          config.git.maxDiffStatChars,
+        )
       : null;
 
     const diff = config.git.includeDiff
-      ? ((
-          await pi.exec("git", ["diff"], {
-            timeout: GIT_DIFF_TIMEOUT_MS,
-            signal,
-          })
-        ).stdout ?? "")
+      ? truncateWithMarker(
+          (
+            await pi.exec("git", ["diff"], {
+              timeout: GIT_DIFF_TIMEOUT_MS,
+              signal,
+            })
+          ).stdout ?? "",
+          config.git.maxDiffChars,
+        )
       : null;
 
     return {

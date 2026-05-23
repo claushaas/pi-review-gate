@@ -6,6 +6,33 @@ import {
   GIT_STATUS_TIMEOUT_MS,
 } from "../src/constants.js";
 import { collectGitContext, isNotGitRepositoryError } from "../src/git.js";
+import { truncateWithMarker } from "../src/utils.js";
+
+describe("truncateWithMarker", () => {
+  it("returns text unchanged when it is within the limit", () => {
+    expect(truncateWithMarker("abc", 3)).toBe("abc");
+    expect(truncateWithMarker("abc", 10)).toBe("abc");
+  });
+
+  it("truncates text and appends a marker", () => {
+    expect(truncateWithMarker("abcdef", 3)).toBe(
+      `abc
+[TRUNCATED: original length 6 chars, included first 3 chars]`,
+    );
+  });
+
+  it("returns text unchanged for invalid limits", () => {
+    expect(truncateWithMarker("abcdef", 0)).toBe("abcdef");
+    expect(truncateWithMarker("abcdef", -1)).toBe("abcdef");
+    expect(truncateWithMarker("abcdef", 1.5)).toBe("abcdef");
+    expect(truncateWithMarker("abcdef", Number.POSITIVE_INFINITY)).toBe("abcdef");
+    expect(truncateWithMarker("abcdef", Number.NaN)).toBe("abcdef");
+  });
+
+  it("does not throw for empty strings", () => {
+    expect(truncateWithMarker("", 10)).toBe("");
+  });
+});
 
 describe("isNotGitRepositoryError", () => {
   it("detects not-a-git-repository errors from stderr", () => {
@@ -379,5 +406,192 @@ describe("collectGitContext non-git handling", () => {
     });
     expect("unavailableReason" in result).toBe(false);
     expect(pi.exec).not.toHaveBeenCalled();
+  });
+});
+
+describe("collectGitContext truncation", () => {
+  it("truncates git outputs using config limits", async () => {
+    const pi = {
+      exec: vi.fn(async (_command: string, args: string[]) => {
+        const joinedArgs = args.join(" ");
+        if (joinedArgs === "status --short") {
+          return { stdout: "abcdef" };
+        }
+        if (joinedArgs === "diff --stat") {
+          return { stdout: "ghijkl" };
+        }
+        if (joinedArgs === "diff") {
+          return { stdout: "mnopqr" };
+        }
+        throw new Error(`Unexpected args: ${joinedArgs}`);
+      }),
+    };
+    const config = {
+      ...defaultConfig,
+      git: {
+        ...defaultConfig.git,
+        maxStatusChars: 3,
+        maxDiffStatChars: 2,
+        maxDiffChars: 4,
+      },
+    };
+    const result = await collectGitContext({
+      pi,
+      config,
+    });
+    expect(result.status).toBe(
+      `abc
+[TRUNCATED: original length 6 chars, included first 3 chars]`,
+    );
+    expect(result.diffStat).toBe(
+      `gh
+[TRUNCATED: original length 6 chars, included first 2 chars]`,
+    );
+    expect(result.diff).toBe(
+      `mnop
+[TRUNCATED: original length 6 chars, included first 4 chars]`,
+    );
+  });
+
+  it("does not truncate outputs within configured limits", async () => {
+    const pi = {
+      exec: vi.fn(async (_command: string, args: string[]) => {
+        const joinedArgs = args.join(" ");
+        if (joinedArgs === "status --short") {
+          return { stdout: "ab" };
+        }
+        if (joinedArgs === "diff --stat") {
+          return { stdout: "cd" };
+        }
+        if (joinedArgs === "diff") {
+          return { stdout: "ef" };
+        }
+        throw new Error(`Unexpected args: ${joinedArgs}`);
+      }),
+    };
+    const config = {
+      ...defaultConfig,
+      git: {
+        ...defaultConfig.git,
+        maxStatusChars: 10,
+        maxDiffStatChars: 10,
+        maxDiffChars: 10,
+      },
+    };
+    await expect(
+      collectGitContext({
+        pi,
+        config,
+      }),
+    ).resolves.toEqual({
+      status: "ab",
+      diffStat: "cd",
+      diff: "ef",
+    });
+  });
+
+  it("keeps disabled outputs as null", async () => {
+    const pi = {
+      exec: vi.fn(async () => ({ stdout: "abcdef" })),
+    };
+    const config = {
+      ...defaultConfig,
+      git: {
+        ...defaultConfig.git,
+        includeStatus: false,
+        includeDiffStat: false,
+        includeDiff: true,
+        maxDiffChars: 3,
+      },
+    };
+    const result = await collectGitContext({
+      pi,
+      config,
+    });
+    expect(result.status).toBeNull();
+    expect(result.diffStat).toBeNull();
+    expect(result.diff).toContain("[TRUNCATED:");
+    expect(pi.exec).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not truncate unavailableReason for non-git directories", async () => {
+    const pi = {
+      exec: vi.fn(async () => {
+        throw {
+          stderr: "fatal: not a git repository (or any of the parent directories): .git",
+        };
+      }),
+    };
+    const config = {
+      ...defaultConfig,
+      git: {
+        ...defaultConfig.git,
+        maxStatusChars: 1,
+        maxDiffStatChars: 1,
+        maxDiffChars: 1,
+      },
+    };
+    await expect(
+      collectGitContext({
+        pi,
+        config,
+      }),
+    ).resolves.toEqual({
+      status: null,
+      diffStat: null,
+      diff: null,
+      unavailableReason: "Git context unavailable: current directory is not a git repository.",
+    });
+  });
+
+  it("git disabled does not apply truncation and returns all null", async () => {
+    const pi = {
+      exec: vi.fn(),
+    };
+    const config = {
+      ...defaultConfig,
+      git: {
+        ...defaultConfig.git,
+        enabled: false,
+        maxStatusChars: 1,
+        maxDiffStatChars: 1,
+        maxDiffChars: 1,
+      },
+    };
+
+    const result = await collectGitContext({
+      pi,
+      config,
+    });
+
+    expect(result).toEqual({
+      status: null,
+      diffStat: null,
+      diff: null,
+    });
+    expect(pi.exec).not.toHaveBeenCalled();
+  });
+
+  it("does not mutate config when truncation is active", async () => {
+    const pi = {
+      exec: vi.fn(async () => ({ stdout: "abcdef" })),
+    };
+    const config = {
+      ...defaultConfig,
+      git: {
+        ...defaultConfig.git,
+        maxStatusChars: 10,
+        maxDiffStatChars: 10,
+        maxDiffChars: 10,
+      },
+    };
+    const before = JSON.stringify(config);
+
+    await collectGitContext({
+      pi,
+      config,
+    });
+
+    expect(JSON.stringify(config)).toBe(before);
   });
 });

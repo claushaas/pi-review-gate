@@ -1,3 +1,5 @@
+import { TRUNCATION_MARKER_PREFIX } from "./constants.js";
+
 /**
  * Attempts to extract a strict top-level JSON object from a raw text string.
  *
@@ -113,4 +115,23 @@ export function hashText(text: string): string {
     hash = (hash * 33) ^ text.charCodeAt(index);
   }
   return (hash >>> 0).toString(16);
+}
+
+/**
+ * Truncates `text` to at most `maxChars` characters. When truncation
+ * occurs, appends a marker indicating the original length and how many
+ * characters were included.
+ *
+ * Returns `text` unchanged when `maxChars` is not a finite positive
+ * integer or when `text.length <= maxChars`.
+ */
+export function truncateWithMarker(text: string, maxChars: number): string {
+  if (!Number.isFinite(maxChars) || !Number.isInteger(maxChars) || maxChars <= 0) {
+    return text;
+  }
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, maxChars)}
+${TRUNCATION_MARKER_PREFIX} original length ${text.length} chars, included first ${maxChars} chars]`;
 }
