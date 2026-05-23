@@ -1,4 +1,8 @@
-import { CUSTOM_ENTRY_REVIEW_RESULT } from "./constants.js";
+import {
+  CUSTOM_ENTRY_FINAL_FAILURE,
+  CUSTOM_ENTRY_REVIEW_RESULT,
+  CUSTOM_ENTRY_REVIEW_SKIPPED,
+} from "./constants.js";
 import type { ModelClient } from "./model.js";
 import { safeParseReviewGateResult } from "./schema.js";
 import type {
@@ -263,6 +267,81 @@ export async function persistReviewResult(params: {
     timestamp: timestamp ?? new Date().toISOString(),
     attempt,
     model,
+    result,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// persistReviewSkipped
+// ---------------------------------------------------------------------------
+
+/**
+ * Persists a skipped review entry when no reviewer model is configured.
+ *
+ * The payload includes the reason for skipping, the model that would have
+ * been used (or `null`), and a timestamp.
+ *
+ * The caller is responsible for providing the reason and model — this
+ * function does not derive them from configuration or runtime state.
+ *
+ * @param params.pi       - The minimal Pi API exposing `appendEntry`.
+ * @param params.reason   - Why the review was skipped.
+ * @param params.model    - The reviewer model that was configured (or `null`).
+ * @param params.timestamp - Optional ISO-8601 timestamp; defaults to `new Date().toISOString()`.
+ */
+export async function persistReviewSkipped(params: {
+  pi: ReviewGateAppendEntryAPI;
+  reason: string;
+  model: ReviewerModelConfig | null;
+  timestamp?: string;
+}): Promise<void> {
+  const { pi, reason, model, timestamp } = params;
+  await pi.appendEntry(CUSTOM_ENTRY_REVIEW_SKIPPED, {
+    timestamp: timestamp ?? new Date().toISOString(),
+    reason,
+    model,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// persistReviewFinalFailure
+// ---------------------------------------------------------------------------
+
+/**
+ * Persists a final failure entry when the maximum correction cycle limit
+ * has been exceeded.
+ *
+ * The payload includes the last review result, the attempt that triggered
+ * the failure, the configured cycle limit, the model, a human-readable
+ * reason, and a timestamp.
+ *
+ * The caller is responsible for determining when the limit has been
+ * exceeded — this function only persists the entry.
+ *
+ * @param params.pi                  - The minimal Pi API exposing `appendEntry`.
+ * @param params.result              - The last review result (preserved as-is).
+ * @param params.attempt             - The correction cycle attempt number.
+ * @param params.maxCorrectionCycles - The configured maximum correction cycles.
+ * @param params.model               - The reviewer model that produced the result (or `null`).
+ * @param params.reason              - Why the review is considered a final failure.
+ * @param params.timestamp           - Optional ISO-8601 timestamp; defaults to `new Date().toISOString()`.
+ */
+export async function persistReviewFinalFailure(params: {
+  pi: ReviewGateAppendEntryAPI;
+  result: ReviewGateResult;
+  attempt: number;
+  maxCorrectionCycles: number;
+  model: ReviewerModelConfig | null;
+  reason: string;
+  timestamp?: string;
+}): Promise<void> {
+  const { pi, result, attempt, maxCorrectionCycles, model, reason, timestamp } = params;
+  await pi.appendEntry(CUSTOM_ENTRY_FINAL_FAILURE, {
+    timestamp: timestamp ?? new Date().toISOString(),
+    attempt,
+    maxCorrectionCycles,
+    model,
+    reason,
     result,
   });
 }

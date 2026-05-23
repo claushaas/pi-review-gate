@@ -1,12 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 import { defaultConfig } from "../src/config.js";
-import { CUSTOM_ENTRY_REVIEW_RESULT } from "../src/constants.js";
+import {
+  CUSTOM_ENTRY_FINAL_FAILURE,
+  CUSTOM_ENTRY_REVIEW_RESULT,
+  CUSTOM_ENTRY_REVIEW_SKIPPED,
+} from "../src/constants.js";
 import type { ModelClient } from "../src/model.js";
 import { createModelClientFromContext, createUnavailableModelClient } from "../src/model.js";
 import {
   buildReviewerSystemPrompt,
   buildReviewerUserPrompt,
+  persistReviewFinalFailure,
   persistReviewResult,
+  persistReviewSkipped,
   runReviewer,
 } from "../src/reviewer.js";
 import type {
@@ -1479,6 +1485,256 @@ describe("persistReviewResult", () => {
       result: approvedResult,
       attempt: 1,
       model: reviewerModel,
+    });
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// persistReviewSkipped
+// ---------------------------------------------------------------------------
+
+describe("persistReviewSkipped", () => {
+  it("persists a skipped review with provided timestamp", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+    };
+    await persistReviewSkipped({
+      pi,
+      reason: "Reviewer model is not configured.",
+      model: null,
+      timestamp: "2026-05-23T12:00:00.000Z",
+    });
+    expect(pi.appendEntry).toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_SKIPPED, {
+      timestamp: "2026-05-23T12:00:00.000Z",
+      reason: "Reviewer model is not configured.",
+      model: null,
+    });
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("persists a skipped review with model metadata when provided", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+    await persistReviewSkipped({
+      pi,
+      reason: "Review gate disabled.",
+      model: reviewerModel,
+      timestamp: "2026-05-23T12:01:00.000Z",
+    });
+    expect(pi.appendEntry).toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_SKIPPED, {
+      timestamp: "2026-05-23T12:01:00.000Z",
+      reason: "Review gate disabled.",
+      model: reviewerModel,
+    });
+  });
+
+  it("generates an ISO timestamp when none is provided", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+    await persistReviewSkipped({
+      pi,
+      reason: "Reviewer model is not configured.",
+      model: null,
+    });
+    const payload = pi.appendEntry.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(payload.timestamp).toEqual(expect.any(String));
+    expect(() => new Date(payload.timestamp as string).toISOString()).not.toThrow();
+  });
+
+  it("propagates appendEntry errors", async () => {
+    const pi = {
+      appendEntry: vi.fn(async () => {
+        throw new Error("append failed");
+      }),
+    };
+    await expect(
+      persistReviewSkipped({
+        pi,
+        reason: "Reviewer model is not configured.",
+        model: null,
+      }),
+    ).rejects.toThrow("append failed");
+  });
+
+  it("does not mutate model", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+    const model: ReviewerModelConfig = {
+      ...reviewerModel,
+    };
+    const before = JSON.stringify(model);
+    await persistReviewSkipped({
+      pi,
+      reason: "Review skipped.",
+      model,
+      timestamp: "2026-05-23T12:00:00.000Z",
+    });
+    expect(JSON.stringify(model)).toBe(before);
+  });
+
+  it("does not call sendUserMessage", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+    };
+    await persistReviewSkipped({
+      pi,
+      reason: "Reviewer model is not configured.",
+      model: null,
+    });
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// persistReviewFinalFailure
+// ---------------------------------------------------------------------------
+
+describe("persistReviewFinalFailure", () => {
+  it("persists a final failure with provided timestamp", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+    };
+    await persistReviewFinalFailure({
+      pi,
+      result: rejectedResult,
+      attempt: 3,
+      maxCorrectionCycles: 2,
+      model: reviewerModel,
+      reason: "Maximum correction cycles exceeded.",
+      timestamp: "2026-05-23T12:10:00.000Z",
+    });
+    expect(pi.appendEntry).toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, {
+      timestamp: "2026-05-23T12:10:00.000Z",
+      attempt: 3,
+      maxCorrectionCycles: 2,
+      model: reviewerModel,
+      reason: "Maximum correction cycles exceeded.",
+      result: rejectedResult,
+    });
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("persists null model for final failure", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+    await persistReviewFinalFailure({
+      pi,
+      result: rejectedResult,
+      attempt: 3,
+      maxCorrectionCycles: 2,
+      model: null,
+      reason: "Maximum correction cycles exceeded.",
+      timestamp: "2026-05-23T12:10:00.000Z",
+    });
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_FINAL_FAILURE,
+      expect.objectContaining({
+        model: null,
+      }),
+    );
+  });
+
+  it("generates an ISO timestamp when none is provided", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+    await persistReviewFinalFailure({
+      pi,
+      result: rejectedResult,
+      attempt: 3,
+      maxCorrectionCycles: 2,
+      model: reviewerModel,
+      reason: "Maximum correction cycles exceeded.",
+    });
+    const payload = pi.appendEntry.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(payload.timestamp).toEqual(expect.any(String));
+    expect(() => new Date(payload.timestamp as string).toISOString()).not.toThrow();
+  });
+
+  it("preserves corrections and evidence", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+    await persistReviewFinalFailure({
+      pi,
+      result: rejectedResult,
+      attempt: 3,
+      maxCorrectionCycles: 2,
+      model: reviewerModel,
+      reason: "Maximum correction cycles exceeded.",
+      timestamp: "2026-05-23T12:10:00.000Z",
+    });
+    const payload = pi.appendEntry.mock.calls[0]?.[1] as Record<string, unknown>;
+    const result = payload.result as ReviewGateResult;
+    expect(result.requiredCorrections).toEqual(["Implement persistReviewResult."]);
+    expect(result.recommendedCorrections).toEqual(["Add tests for appendEntry payload."]);
+    expect(result.evidence).toEqual(["No persisted review entry was found."]);
+  });
+
+  it("propagates appendEntry errors", async () => {
+    const pi = {
+      appendEntry: vi.fn(async () => {
+        throw new Error("append failed");
+      }),
+    };
+    await expect(
+      persistReviewFinalFailure({
+        pi,
+        result: rejectedResult,
+        attempt: 3,
+        maxCorrectionCycles: 2,
+        model: reviewerModel,
+        reason: "Maximum correction cycles exceeded.",
+      }),
+    ).rejects.toThrow("append failed");
+  });
+
+  it("does not mutate result or model", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+    const result: ReviewGateResult = {
+      ...rejectedResult,
+      requiredCorrections: [...rejectedResult.requiredCorrections],
+      recommendedCorrections: [...rejectedResult.recommendedCorrections],
+      evidence: [...rejectedResult.evidence],
+    };
+    const model: ReviewerModelConfig = {
+      ...reviewerModel,
+    };
+    const before = JSON.stringify({ result, model });
+    await persistReviewFinalFailure({
+      pi,
+      result,
+      attempt: 3,
+      maxCorrectionCycles: 2,
+      model,
+      reason: "Maximum correction cycles exceeded.",
+      timestamp: "2026-05-23T12:10:00.000Z",
+    });
+    expect(JSON.stringify({ result, model })).toBe(before);
+  });
+
+  it("does not call sendUserMessage", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+    };
+    await persistReviewFinalFailure({
+      pi,
+      result: rejectedResult,
+      attempt: 3,
+      maxCorrectionCycles: 2,
+      model: reviewerModel,
+      reason: "Maximum correction cycles exceeded.",
     });
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
   });
