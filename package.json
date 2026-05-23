@@ -1,0 +1,13 @@
+{
+  "name": "pi-review-gate",
+  "version": "0.1.0",
+  "description": "Mandatory review gate extension for Pi Coding Agent.",
+  "type": "module",
+  "main": "./src/index.ts",
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "scripts": {},
+  "dependencies": {},
+  "devDependencies": {}
+}
