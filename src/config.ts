@@ -11,6 +11,7 @@ import {
   DEFAULT_MAX_STATUS_CHARS,
   DEFAULT_REVIEWER_TIMEOUT_MS,
 } from "./constants.js";
+import { validateConfig } from "./schema.js";
 import type { ReviewGateConfig } from "./types.js";
 
 export type PartialReviewGateConfig = {
@@ -91,10 +92,10 @@ export async function loadConfig(configPath = resolveConfigPath()): Promise<Revi
   try {
     const raw = await readFile(configPath, "utf8");
     const parsed: unknown = JSON.parse(raw);
-    return mergeConfig(parsed as PartialReviewGateConfig);
+    return validateConfig(mergeConfig(parsed as PartialReviewGateConfig));
   } catch (error: unknown) {
     if (isNodeError(error) && error.code === "ENOENT") {
-      return mergeConfig(undefined);
+      return validateConfig(mergeConfig(undefined));
     }
     throw error;
   }

@@ -214,4 +214,28 @@ describe("config persistence", () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it("rejects config with invalid mode in file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-review-gate-"));
+    const path = join(dir, "config.json");
+    try {
+      const invalid = { mode: "invalid" };
+      await writeFile(path, JSON.stringify(invalid), "utf8");
+      await expect(loadConfig(path)).rejects.toThrow("config.mode");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects config with negative maxCorrectionCycles in file", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "pi-review-gate-"));
+    const path = join(dir, "config.json");
+    try {
+      const invalid = { maxCorrectionCycles: -1 };
+      await writeFile(path, JSON.stringify(invalid), "utf8");
+      await expect(loadConfig(path)).rejects.toThrow("config.maxCorrectionCycles");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
