@@ -1,13 +1,20 @@
 import { describe, expect, it, vi } from "vitest";
 import { defaultConfig } from "../src/config.js";
+import { CUSTOM_ENTRY_REVIEW_RESULT } from "../src/constants.js";
 import type { ModelClient } from "../src/model.js";
 import { createModelClientFromContext, createUnavailableModelClient } from "../src/model.js";
 import {
   buildReviewerSystemPrompt,
   buildReviewerUserPrompt,
+  persistReviewResult,
   runReviewer,
 } from "../src/reviewer.js";
-import type { ReviewContext, ReviewGateConfig } from "../src/types.js";
+import type {
+  ReviewContext,
+  ReviewerModelConfig,
+  ReviewGateConfig,
+  ReviewGateResult,
+} from "../src/types.js";
 
 describe("buildReviewerSystemPrompt", () => {
   it("returns a deterministic non-empty prompt", () => {
@@ -1289,5 +1296,190 @@ describe("runReviewer", () => {
     });
 
     expect(JSON.stringify({ config, context })).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// persistReviewResult fixtures
+// ---------------------------------------------------------------------------
+
+const reviewerModel: ReviewerModelConfig = {
+  provider: "test-provider",
+  id: "test-model",
+  thinkingLevel: "high",
+};
+
+const approvedResult: ReviewGateResult = {
+  approved: true,
+  severity: "pass",
+  summary: "Delivery satisfies the request.",
+  requiredCorrections: [],
+  recommendedCorrections: [],
+  evidence: ["Reviewer approved the delivery."],
+  confidence: "high",
+};
+
+const rejectedResult: ReviewGateResult = {
+  approved: false,
+  severity: "blocking",
+  summary: "Required implementation is missing.",
+  requiredCorrections: ["Implement persistReviewResult."],
+  recommendedCorrections: ["Add tests for appendEntry payload."],
+  evidence: ["No persisted review entry was found."],
+  confidence: "high",
+};
+
+// ---------------------------------------------------------------------------
+// persistReviewResult
+// ---------------------------------------------------------------------------
+
+describe("persistReviewResult", () => {
+  it("persists an approved review result", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+    };
+    await persistReviewResult({
+      pi,
+      result: approvedResult,
+      attempt: 1,
+      model: reviewerModel,
+      timestamp: "2026-05-23T12:00:00.000Z",
+    });
+    expect(pi.appendEntry).toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, {
+      timestamp: "2026-05-23T12:00:00.000Z",
+      attempt: 1,
+      model: reviewerModel,
+      result: approvedResult,
+    });
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("persists a rejected review result with corrections and evidence", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+    };
+    await persistReviewResult({
+      pi,
+      result: rejectedResult,
+      attempt: 2,
+      model: reviewerModel,
+      timestamp: "2026-05-23T12:05:00.000Z",
+    });
+    expect(pi.appendEntry).toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, {
+      timestamp: "2026-05-23T12:05:00.000Z",
+      attempt: 2,
+      model: reviewerModel,
+      result: rejectedResult,
+    });
+    const payload = pi.appendEntry.mock.calls[0]?.[1] as Record<string, unknown>;
+    const result = payload.result as ReviewGateResult;
+    expect(result.requiredCorrections).toEqual(["Implement persistReviewResult."]);
+    expect(result.recommendedCorrections).toEqual(["Add tests for appendEntry payload."]);
+    expect(result.evidence).toEqual(["No persisted review entry was found."]);
+  });
+
+  it("generates an ISO timestamp when none is provided", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+    await persistReviewResult({
+      pi,
+      result: approvedResult,
+      attempt: 1,
+      model: reviewerModel,
+    });
+    const payload = pi.appendEntry.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(payload.timestamp).toEqual(expect.any(String));
+    expect(() => new Date(payload.timestamp as string).toISOString()).not.toThrow();
+  });
+
+  it("uses the provided timestamp when given", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+    await persistReviewResult({
+      pi,
+      result: approvedResult,
+      attempt: 1,
+      model: reviewerModel,
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    const payload = pi.appendEntry.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(payload.timestamp).toBe("2026-01-01T00:00:00.000Z");
+  });
+
+  it("persists null model when no model is available", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+    await persistReviewResult({
+      pi,
+      result: approvedResult,
+      attempt: 1,
+      model: null,
+      timestamp: "2026-05-23T12:00:00.000Z",
+    });
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        model: null,
+      }),
+    );
+  });
+
+  it("propagates appendEntry errors", async () => {
+    const pi = {
+      appendEntry: vi.fn(async () => {
+        throw new Error("append failed");
+      }),
+    };
+    await expect(
+      persistReviewResult({
+        pi,
+        result: approvedResult,
+        attempt: 1,
+        model: reviewerModel,
+      }),
+    ).rejects.toThrow("append failed");
+  });
+
+  it("does not mutate result or model", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+    const result: ReviewGateResult = {
+      ...rejectedResult,
+      requiredCorrections: [...rejectedResult.requiredCorrections],
+      recommendedCorrections: [...rejectedResult.recommendedCorrections],
+      evidence: [...rejectedResult.evidence],
+    };
+    const model: ReviewerModelConfig = {
+      ...reviewerModel,
+    };
+    const before = JSON.stringify({ result, model });
+    await persistReviewResult({
+      pi,
+      result,
+      attempt: 1,
+      model,
+      timestamp: "2026-05-23T12:00:00.000Z",
+    });
+    expect(JSON.stringify({ result, model })).toBe(before);
+  });
+
+  it("does not call sendUserMessage", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+    };
+    await persistReviewResult({
+      pi,
+      result: approvedResult,
+      attempt: 1,
+      model: reviewerModel,
+    });
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,12 @@
+import { CUSTOM_ENTRY_REVIEW_RESULT } from "./constants.js";
 import type { ModelClient } from "./model.js";
 import { safeParseReviewGateResult } from "./schema.js";
-import type { ReviewContext, ReviewGateConfig, ReviewGateResult } from "./types.js";
+import type {
+  ReviewContext,
+  ReviewerModelConfig,
+  ReviewGateConfig,
+  ReviewGateResult,
+} from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Private helpers for building context sections with stable missing-value markers
@@ -220,4 +226,43 @@ export async function runReviewer(params: {
   }
 
   return parsed.value;
+}
+
+// ---------------------------------------------------------------------------
+// persistReviewResult
+// ---------------------------------------------------------------------------
+
+type ReviewGateAppendEntryAPI = {
+  appendEntry(type: string, payload: unknown): Promise<void> | void;
+};
+
+/**
+ * Persists a review result as a session entry via {@link ReviewGateAppendEntryAPI.appendEntry}.
+ *
+ * The payload includes the full result, the model that produced it (or
+ * `null`), the correction attempt number, and a timestamp.
+ *
+ * The caller is responsible for providing the correct attempt number and
+ * model — this function does not derive them from runtime state.
+ *
+ * @param params.pi     - The minimal Pi API exposing `appendEntry`.
+ * @param params.result - The validated review result to persist.
+ * @param params.attempt - The correction cycle attempt number (1-indexed).
+ * @param params.model  - The reviewer model that produced the result, or `null`.
+ * @param params.timestamp - Optional ISO-8601 timestamp; defaults to `new Date().toISOString()`.
+ */
+export async function persistReviewResult(params: {
+  pi: ReviewGateAppendEntryAPI;
+  result: ReviewGateResult;
+  attempt: number;
+  model: ReviewerModelConfig | null;
+  timestamp?: string;
+}): Promise<void> {
+  const { pi, result, attempt, model, timestamp } = params;
+  await pi.appendEntry(CUSTOM_ENTRY_REVIEW_RESULT, {
+    timestamp: timestamp ?? new Date().toISOString(),
+    attempt,
+    model,
+    result,
+  });
 }
