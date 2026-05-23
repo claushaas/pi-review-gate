@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { extractCurrentUserPrompt, extractLatestAssistantResponse } from "../src/context.js";
+import { CORRECTION_REQUEST_MARKER } from "../src/constants.js";
+import {
+  collectSessionSliceSinceLastRealUserMessage,
+  extractCurrentUserPrompt,
+  extractLatestAssistantResponse,
+} from "../src/context.js";
 
 // ---------------------------------------------------------------------------
 // extractCurrentUserPrompt
@@ -138,5 +143,246 @@ describe("extractLatestAssistantResponse", () => {
     const before = JSON.stringify(messages);
     extractLatestAssistantResponse(messages);
     expect(JSON.stringify(messages)).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collectSessionSliceSinceLastRealUserMessage
+// ---------------------------------------------------------------------------
+
+describe("collectSessionSliceSinceLastRealUserMessage", () => {
+  it("returns an empty slice for an empty branch", () => {
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch: [],
+        maxEntries: 40,
+      }),
+    ).toEqual([]);
+  });
+
+  it("returns an empty slice when no user message entry exists", () => {
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch: [{ type: "message", message: { role: "assistant", content: "answer" } }],
+        maxEntries: 40,
+      }),
+    ).toEqual([]);
+  });
+
+  it("returns the slice from the latest real user message", () => {
+    const branch = [
+      { type: "message", message: { role: "user", content: "first" } },
+      { type: "message", message: { role: "assistant", content: "first answer" } },
+      { type: "message", message: { role: "user", content: "second" } },
+      { type: "message", message: { role: "assistant", content: "second answer" } },
+    ];
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch,
+        maxEntries: 40,
+      }),
+    ).toEqual(branch.slice(2));
+  });
+
+  it("uses the last real user message when there are multiple", () => {
+    const branch = [
+      { type: "message", message: { role: "user", content: "first" } },
+      { type: "message", message: { role: "assistant", content: "a" } },
+      { type: "message", message: { role: "user", content: "second" } },
+      { type: "message", message: { role: "user", content: "third" } },
+      { type: "message", message: { role: "assistant", content: "b" } },
+    ];
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch,
+        maxEntries: 40,
+      }),
+    ).toEqual(branch.slice(3));
+  });
+
+  it("ignores review-gate injected user messages when finding the start", () => {
+    const branch = [
+      { type: "message", message: { role: "user", content: "real prompt" } },
+      { type: "message", message: { role: "assistant", content: "answer" } },
+      {
+        type: "message",
+        message: {
+          role: "user",
+          content: `${CORRECTION_REQUEST_MARKER}\nMandatory review failed.`,
+        },
+      },
+      { type: "message", message: { role: "assistant", content: "correction" } },
+    ];
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch,
+        maxEntries: 40,
+      }),
+    ).toEqual(branch);
+  });
+
+  it("does not let injected prompt redefine the slice start", () => {
+    const branch = [
+      { type: "message", message: { role: "user", content: "real prompt" } },
+      { type: "message", message: { role: "assistant", content: "answer" } },
+      {
+        type: "message",
+        message: {
+          role: "user",
+          content: `${CORRECTION_REQUEST_MARKER}\nfix this`,
+        },
+      },
+      { type: "message", message: { role: "assistant", content: "correction" } },
+      {
+        type: "message",
+        message: {
+          role: "user",
+          content: `${CORRECTION_REQUEST_MARKER}\nagain`,
+        },
+      },
+      { type: "message", message: { role: "assistant", content: "correction 2" } },
+    ];
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch,
+        maxEntries: 40,
+      }),
+    ).toEqual(branch);
+  });
+
+  it("accepts nested entry.message.role format", () => {
+    const branch = [
+      {
+        type: "message",
+        message: { role: "user", content: "nested format" },
+      },
+      {
+        type: "message",
+        message: { role: "assistant", content: "response" },
+      },
+    ];
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch,
+        maxEntries: 40,
+      }),
+    ).toEqual(branch);
+  });
+
+  it("accepts fallback flat entry.role format", () => {
+    const branch = [
+      { type: "message", role: "user", content: "flat format" },
+      { type: "message", role: "assistant", content: "response" },
+    ];
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch,
+        maxEntries: 40,
+      }),
+    ).toEqual(branch);
+  });
+
+  it("returns an empty slice when maxEntries <= 0", () => {
+    const branch = [{ type: "message", message: { role: "user", content: "real" } }];
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch,
+        maxEntries: 0,
+      }),
+    ).toEqual([]);
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch,
+        maxEntries: -1,
+      }),
+    ).toEqual([]);
+  });
+
+  it("returns an empty slice when maxEntries is not an integer", () => {
+    const branch = [{ type: "message", message: { role: "user", content: "real" } }];
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch,
+        maxEntries: 1.5,
+      }),
+    ).toEqual([]);
+  });
+
+  it("returns an empty slice when maxEntries is not finite", () => {
+    const branch = [{ type: "message", message: { role: "user", content: "real" } }];
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch,
+        maxEntries: Number.POSITIVE_INFINITY,
+      }),
+    ).toEqual([]);
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch,
+        maxEntries: Number.NaN,
+      }),
+    ).toEqual([]);
+  });
+
+  it("limits the slice to the latest maxEntries items", () => {
+    const branch = [
+      { type: "message", message: { role: "user", content: "real prompt" } },
+      { type: "message", message: { role: "assistant", content: "a" } },
+      { type: "custom", customType: "x" },
+      { type: "message", message: { role: "assistant", content: "b" } },
+    ];
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch,
+        maxEntries: 2,
+      }),
+    ).toEqual(branch.slice(2));
+  });
+
+  it("limits when slice from real user exceeds maxEntries", () => {
+    const branch = [
+      { type: "message", message: { role: "user", content: "real" } },
+      { type: "message", message: { role: "assistant", content: "a" } },
+      { type: "message", message: { role: "assistant", content: "b" } },
+      { type: "message", message: { role: "assistant", content: "c" } },
+      { type: "message", message: { role: "assistant", content: "d" } },
+    ];
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch,
+        maxEntries: 3,
+      }),
+    ).toEqual(branch.slice(2));
+  });
+
+  it("does not mutate the branch", () => {
+    const branch = [
+      { type: "message", message: { role: "user", content: "real prompt" } },
+      { type: "message", message: { role: "assistant", content: "answer" } },
+    ];
+    const before = JSON.stringify(branch);
+    collectSessionSliceSinceLastRealUserMessage({
+      branch,
+      maxEntries: 40,
+    });
+    expect(JSON.stringify(branch)).toBe(before);
+  });
+
+  it("does not throw for malformed entries", () => {
+    expect(() =>
+      collectSessionSliceSinceLastRealUserMessage({
+        branch: [null, 42, "hello", undefined, {}, { type: 123 }],
+        maxEntries: 40,
+      }),
+    ).not.toThrow();
+  });
+
+  it("returns empty slice for malformed entries without a real user", () => {
+    expect(
+      collectSessionSliceSinceLastRealUserMessage({
+        branch: [null, 42, "hello", undefined, {}, { type: 123 }],
+        maxEntries: 40,
+      }),
+    ).toEqual([]);
   });
 });
