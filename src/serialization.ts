@@ -48,3 +48,67 @@ export function getMessageText(message: unknown): string {
 
   return extractTextFromContent(message.content);
 }
+
+function getMessageRole(message: unknown): string {
+  if (!isRecord(message) || typeof message.role !== "string" || message.role.length === 0) {
+    return "unknown";
+  }
+  return message.role;
+}
+
+function getMessageToolName(message: unknown): string | null {
+  if (!isRecord(message)) {
+    return null;
+  }
+  if (typeof message.toolName === "string" && message.toolName.length > 0) {
+    return message.toolName;
+  }
+  if (typeof message.tool === "string" && message.tool.length > 0) {
+    return message.tool;
+  }
+  return null;
+}
+
+function getMessageIsError(message: unknown): boolean | null {
+  if (!isRecord(message) || typeof message.isError !== "boolean") {
+    return null;
+  }
+  return message.isError;
+}
+
+/**
+ * Serializes an array of message-like objects into a stable, human-readable
+ * block format.
+ *
+ * Each message is rendered as a `[message N]` block with role, optional
+ * tool name, optional error flag, and textual content extracted via
+ * {@link getMessageText}. Blocks are separated by a single blank line.
+ *
+ * Returns an empty string for an empty array. Never throws.
+ */
+export function serializeMessages(messages: unknown[]): string {
+  if (messages.length === 0) {
+    return "";
+  }
+
+  return messages
+    .map((message, index) => {
+      const lines = [`[message ${index + 1}]`, `role: ${getMessageRole(message)}`];
+
+      const toolName = getMessageToolName(message);
+      if (toolName !== null) {
+        lines.push(`tool: ${toolName}`);
+      }
+
+      const isError = getMessageIsError(message);
+      if (isError !== null) {
+        lines.push(`isError: ${String(isError)}`);
+      }
+
+      lines.push("content:");
+      lines.push(getMessageText(message));
+
+      return lines.join("\n");
+    })
+    .join("\n\n");
+}
