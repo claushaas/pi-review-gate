@@ -4,6 +4,7 @@ import type {
   ReviewerModelConfig,
   ReviewerRuntimeConfig,
   ReviewGateConfig,
+  ReviewGateResult,
   ReviewGateUiConfig,
 } from "./types.js";
 
@@ -22,8 +23,19 @@ function assertBoolean(value: unknown, path: string): asserts value is boolean {
 }
 
 function assertNonEmptyString(value: unknown, path: string): asserts value is string {
-  if (typeof value !== "string" || value.length === 0) {
+  if (typeof value !== "string" || value.trim().length === 0) {
     throw new Error(`Invalid ${path}: expected non-empty string.`);
+  }
+}
+
+function assertStringArray(value: unknown, path: string): asserts value is string[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`Invalid ${path}: expected string array.`);
+  }
+  for (let i = 0; i < value.length; i++) {
+    if (typeof value[i] !== "string" || (value[i] as string).trim().length === 0) {
+      throw new Error(`Invalid ${path}: expected string array.`);
+    }
   }
 }
 
@@ -128,6 +140,39 @@ function validateUi(value: unknown, path: string): ReviewGateUiConfig {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
+/**
+ * Validates a review gate result object and returns it typed as
+ * `ReviewGateResult`. Throws if any field is missing or invalid.
+ *
+ * This function validates structure only — it does not parse JSON,
+ * extract JSON from textual responses, or interact with the model.
+ */
+export function parseReviewGateResult(value: unknown): ReviewGateResult {
+  if (!isRecord(value) || Array.isArray(value)) {
+    throw new Error("Invalid review result: expected object.");
+  }
+
+  assertBoolean(value.approved, "reviewResult.approved");
+  assertStringUnion(
+    value.severity,
+    ["pass", "minor", "major", "blocking"],
+    "reviewResult.severity",
+  );
+  assertNonEmptyString(value.summary, "reviewResult.summary");
+  assertStringArray(value.requiredCorrections, "reviewResult.requiredCorrections");
+  assertStringArray(value.recommendedCorrections, "reviewResult.recommendedCorrections");
+  assertStringArray(value.evidence, "reviewResult.evidence");
+  assertStringUnion(value.confidence, ["low", "medium", "high"], "reviewResult.confidence");
+
+  if (!value.approved && (value.requiredCorrections as string[]).length === 0) {
+    throw new Error(
+      "Invalid reviewResult.requiredCorrections: expected at least one item when approved is false.",
+    );
+  }
+
+  return value as ReviewGateResult;
+}
 
 /**
  * Validates a merged configuration object and returns it typed as

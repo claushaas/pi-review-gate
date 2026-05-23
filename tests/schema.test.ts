@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { defaultConfig } from "../src/config.js";
-import { validateConfig } from "../src/schema.js";
+import { parseReviewGateResult, validateConfig } from "../src/schema.js";
 
 // ---------------------------------------------------------------------------
 // Valid config
@@ -387,5 +387,323 @@ describe("validateConfig", () => {
 
   it("rejects ui not object", () => {
     expect(() => validateConfig({ ...defaultConfig, ui: "bad" })).toThrow("config.ui");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseReviewGateResult
+// ---------------------------------------------------------------------------
+
+const validApprovedResult = {
+  approved: true,
+  severity: "pass",
+  summary: "Delivery satisfies the request.",
+  requiredCorrections: [],
+  recommendedCorrections: [],
+  evidence: ["Diff matches final response."],
+  confidence: "high",
+} as const;
+
+const validRejectedResult = {
+  approved: false,
+  severity: "blocking",
+  summary: "Missing error handling.",
+  requiredCorrections: ["Add try/catch around the async call."],
+  recommendedCorrections: ["Consider using a Result type."],
+  evidence: ["Line 42 has unhandled promise rejection."],
+  confidence: "high",
+} as const;
+
+describe("parseReviewGateResult", () => {
+  // -----------------------------------------------------------------------
+  // Valid results
+  // -----------------------------------------------------------------------
+
+  it("accepts a valid approved result", () => {
+    expect(parseReviewGateResult(validApprovedResult)).toEqual(validApprovedResult);
+  });
+
+  it("accepts a valid rejected result with at least one required correction", () => {
+    expect(parseReviewGateResult(validRejectedResult)).toEqual(validRejectedResult);
+  });
+
+  it("accepts requiredCorrections: [] when approved === true", () => {
+    expect(
+      parseReviewGateResult({ ...validApprovedResult, requiredCorrections: [] }),
+    ).toBeDefined();
+  });
+
+  it("accepts recommendedCorrections: []", () => {
+    expect(
+      parseReviewGateResult({ ...validApprovedResult, recommendedCorrections: [] }),
+    ).toBeDefined();
+  });
+
+  it("accepts evidence: []", () => {
+    expect(parseReviewGateResult({ ...validApprovedResult, evidence: [] })).toBeDefined();
+  });
+
+  // -----------------------------------------------------------------------
+  // Top-level invalid
+  // -----------------------------------------------------------------------
+
+  it("rejects null", () => {
+    expect(() => parseReviewGateResult(null)).toThrow("Invalid review result");
+  });
+
+  it("rejects array", () => {
+    expect(() => parseReviewGateResult([])).toThrow("Invalid review result");
+  });
+
+  it("rejects string", () => {
+    expect(() => parseReviewGateResult("nope")).toThrow("Invalid review result");
+  });
+
+  it("rejects empty object", () => {
+    expect(() => parseReviewGateResult({})).toThrow("reviewResult");
+  });
+
+  // -----------------------------------------------------------------------
+  // approved
+  // -----------------------------------------------------------------------
+
+  it("rejects missing approved", () => {
+    const { approved: _, ...rest } = validApprovedResult;
+    expect(() => parseReviewGateResult(rest)).toThrow("reviewResult.approved");
+  });
+
+  it("rejects approved string", () => {
+    expect(() => parseReviewGateResult({ ...validApprovedResult, approved: "true" })).toThrow(
+      "reviewResult.approved",
+    );
+  });
+
+  it("accepts approved: true", () => {
+    expect(parseReviewGateResult({ ...validApprovedResult, approved: true })).toBeDefined();
+  });
+
+  it("accepts approved: false", () => {
+    expect(
+      parseReviewGateResult({
+        ...validRejectedResult,
+        approved: false,
+      }),
+    ).toBeDefined();
+  });
+
+  // -----------------------------------------------------------------------
+  // severity
+  // -----------------------------------------------------------------------
+
+  it.each(["pass", "minor", "major", "blocking"] as const)("accepts severity: %s", (severity) => {
+    expect(parseReviewGateResult({ ...validApprovedResult, severity })).toBeDefined();
+  });
+
+  it("rejects invalid severity", () => {
+    expect(() => parseReviewGateResult({ ...validApprovedResult, severity: "critical" })).toThrow(
+      "reviewResult.severity",
+    );
+  });
+
+  it("rejects missing severity", () => {
+    const { severity: _, ...rest } = validApprovedResult;
+    expect(() => parseReviewGateResult(rest)).toThrow("reviewResult.severity");
+  });
+
+  // -----------------------------------------------------------------------
+  // summary
+  // -----------------------------------------------------------------------
+
+  it("rejects missing summary", () => {
+    const { summary: _, ...rest } = validApprovedResult;
+    expect(() => parseReviewGateResult(rest)).toThrow("reviewResult.summary");
+  });
+
+  it("rejects non-string summary", () => {
+    expect(() => parseReviewGateResult({ ...validApprovedResult, summary: 42 })).toThrow(
+      "reviewResult.summary",
+    );
+  });
+
+  it("rejects empty summary", () => {
+    expect(() => parseReviewGateResult({ ...validApprovedResult, summary: "" })).toThrow(
+      "reviewResult.summary",
+    );
+  });
+
+  it("rejects whitespace-only summary", () => {
+    expect(() => parseReviewGateResult({ ...validApprovedResult, summary: "   " })).toThrow(
+      "reviewResult.summary",
+    );
+  });
+
+  it("accepts non-empty summary", () => {
+    expect(
+      parseReviewGateResult({
+        ...validApprovedResult,
+        summary: "All good.",
+      }),
+    ).toBeDefined();
+  });
+
+  // -----------------------------------------------------------------------
+  // requiredCorrections
+  // -----------------------------------------------------------------------
+
+  it("rejects missing requiredCorrections", () => {
+    const { requiredCorrections: _, ...rest } = validApprovedResult;
+    expect(() => parseReviewGateResult(rest)).toThrow("reviewResult.requiredCorrections");
+  });
+
+  it("rejects non-array requiredCorrections", () => {
+    expect(() =>
+      parseReviewGateResult({
+        ...validApprovedResult,
+        requiredCorrections: "fix it",
+      }),
+    ).toThrow("reviewResult.requiredCorrections");
+  });
+
+  it("rejects non-string item in requiredCorrections", () => {
+    expect(() =>
+      parseReviewGateResult({
+        ...validApprovedResult,
+        requiredCorrections: [42],
+      }),
+    ).toThrow("reviewResult.requiredCorrections");
+  });
+
+  it("rejects empty string item in requiredCorrections", () => {
+    expect(() =>
+      parseReviewGateResult({
+        ...validApprovedResult,
+        requiredCorrections: [""],
+      }),
+    ).toThrow("reviewResult.requiredCorrections");
+  });
+
+  it("rejects empty array when approved === false", () => {
+    expect(() =>
+      parseReviewGateResult({
+        ...validApprovedResult,
+        approved: false,
+        severity: "blocking",
+        requiredCorrections: [],
+      }),
+    ).toThrow("reviewResult.requiredCorrections");
+  });
+
+  it("accepts empty array when approved === true", () => {
+    expect(
+      parseReviewGateResult({
+        ...validApprovedResult,
+        approved: true,
+        requiredCorrections: [],
+      }),
+    ).toBeDefined();
+  });
+
+  it("accepts array with non-empty strings when approved === false", () => {
+    expect(
+      parseReviewGateResult({
+        ...validRejectedResult,
+        requiredCorrections: ["Fix line 10."],
+      }),
+    ).toBeDefined();
+  });
+
+  // -----------------------------------------------------------------------
+  // recommendedCorrections
+  // -----------------------------------------------------------------------
+
+  it("rejects missing recommendedCorrections", () => {
+    const { recommendedCorrections: _, ...rest } = validApprovedResult;
+    expect(() => parseReviewGateResult(rest)).toThrow("reviewResult.recommendedCorrections");
+  });
+
+  it("rejects non-array recommendedCorrections", () => {
+    expect(() =>
+      parseReviewGateResult({
+        ...validApprovedResult,
+        recommendedCorrections: "maybe",
+      }),
+    ).toThrow("reviewResult.recommendedCorrections");
+  });
+
+  it("rejects non-string item in recommendedCorrections", () => {
+    expect(() =>
+      parseReviewGateResult({
+        ...validApprovedResult,
+        recommendedCorrections: [42],
+      }),
+    ).toThrow("reviewResult.recommendedCorrections");
+  });
+
+  it("rejects empty string item in recommendedCorrections", () => {
+    expect(() =>
+      parseReviewGateResult({
+        ...validApprovedResult,
+        recommendedCorrections: [""],
+      }),
+    ).toThrow("reviewResult.recommendedCorrections");
+  });
+
+  it("accepts empty array", () => {
+    expect(
+      parseReviewGateResult({
+        ...validApprovedResult,
+        recommendedCorrections: [],
+      }),
+    ).toBeDefined();
+  });
+
+  // -----------------------------------------------------------------------
+  // evidence
+  // -----------------------------------------------------------------------
+
+  it("rejects missing evidence", () => {
+    const { evidence: _, ...rest } = validApprovedResult;
+    expect(() => parseReviewGateResult(rest)).toThrow("reviewResult.evidence");
+  });
+
+  it("rejects non-array evidence", () => {
+    expect(() => parseReviewGateResult({ ...validApprovedResult, evidence: "stuff" })).toThrow(
+      "reviewResult.evidence",
+    );
+  });
+
+  it("rejects non-string item in evidence", () => {
+    expect(() => parseReviewGateResult({ ...validApprovedResult, evidence: [42] })).toThrow(
+      "reviewResult.evidence",
+    );
+  });
+
+  it("rejects empty string item in evidence", () => {
+    expect(() => parseReviewGateResult({ ...validApprovedResult, evidence: [""] })).toThrow(
+      "reviewResult.evidence",
+    );
+  });
+
+  it("accepts empty array", () => {
+    expect(parseReviewGateResult({ ...validApprovedResult, evidence: [] })).toBeDefined();
+  });
+
+  // -----------------------------------------------------------------------
+  // confidence
+  // -----------------------------------------------------------------------
+
+  it.each(["low", "medium", "high"] as const)("accepts confidence: %s", (confidence) => {
+    expect(parseReviewGateResult({ ...validApprovedResult, confidence })).toBeDefined();
+  });
+
+  it("rejects invalid confidence", () => {
+    expect(() => parseReviewGateResult({ ...validApprovedResult, confidence: "unknown" })).toThrow(
+      "reviewResult.confidence",
+    );
+  });
+
+  it("rejects missing confidence", () => {
+    const { confidence: _, ...rest } = validApprovedResult;
+    expect(() => parseReviewGateResult(rest)).toThrow("reviewResult.confidence");
   });
 });
