@@ -1,1 +1,31 @@
-{}
+{
+  "enabled": true,
+  "mode": "block",
+  "reviewerModel": null,
+  "maxCorrectionCycles": 2,
+  "context": {
+    "strategy": "current_run",
+    "includeEventMessages": true,
+    "includeSessionSlice": true,
+    "maxSessionEntries": 40
+  },
+  "git": {
+    "enabled": true,
+    "includeStatus": true,
+    "includeDiffStat": true,
+    "includeDiff": true,
+    "maxDiffChars": 60000,
+    "maxStatusChars": 12000,
+    "maxDiffStatChars": 12000
+  },
+  "reviewer": {
+    "requireJson": true,
+    "failClosedOnInvalidJson": true,
+    "timeoutMs": 120000
+  },
+  "ui": {
+    "notifyOnPass": true,
+    "notifyOnFail": true,
+    "showReviewerSummary": true
+  }
+}
