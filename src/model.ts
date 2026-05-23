@@ -1,5 +1,88 @@
 import type { ReviewerModelConfig } from "./types.js";
 
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+function isPositiveInteger(value: number): boolean {
+  return Number.isFinite(value) && Number.isInteger(value) && value > 0;
+}
+
+function createTimeoutError(timeoutMs: number): Error {
+  return new Error(`Reviewer model request timed out after ${timeoutMs}ms.`);
+}
+
+function createAbortError(): Error {
+  return new Error("Reviewer model request was aborted.");
+}
+
+type CombinedSignal = {
+  signal?: AbortSignal;
+  cleanup: () => void;
+  throwIfTimedOutOrAborted: () => void;
+};
+
+function createCombinedSignal(params: { signal?: AbortSignal; timeoutMs: number }): CombinedSignal {
+  const { signal, timeoutMs } = params;
+
+  // External signal already aborted — reject immediately without creating timers.
+  if (signal?.aborted) {
+    return {
+      signal,
+      cleanup: () => {},
+      throwIfTimedOutOrAborted: () => {
+        throw createAbortError();
+      },
+    };
+  }
+
+  // No valid timeout — just propagate the external signal (if any).
+  if (!isPositiveInteger(timeoutMs)) {
+    return {
+      signal,
+      cleanup: () => {},
+      throwIfTimedOutOrAborted: () => {
+        if (signal?.aborted) {
+          throw createAbortError();
+        }
+      },
+    };
+  }
+
+  const controller = new AbortController();
+  let timedOut = false;
+
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  const abortFromExternalSignal = () => {
+    controller.abort();
+  };
+  signal?.addEventListener("abort", abortFromExternalSignal, { once: true });
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abortFromExternalSignal);
+    },
+    throwIfTimedOutOrAborted: () => {
+      if (timedOut) {
+        throw createTimeoutError(timeoutMs);
+      }
+      if (signal?.aborted) {
+        throw createAbortError();
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
 export type ModelRegistryCandidate = {
   provider?: string;
   id?: string;
@@ -111,19 +194,35 @@ export function createModelClientFromContext(context: ModelClientContext): Model
         throw new Error(`Reviewer model does not expose a complete method: ${modelLabel}`);
       }
 
-      const response = await candidate.complete({
-        systemPrompt: params.systemPrompt,
-        userPrompt: params.userPrompt,
+      const combinedSignal = createCombinedSignal({
         signal: params.signal,
         timeoutMs: params.timeoutMs,
-        thinkingLevel: params.model.thinkingLevel,
       });
 
-      if (typeof response !== "string") {
-        throw new Error(`Reviewer model returned a non-string response: ${modelLabel}`);
-      }
+      try {
+        combinedSignal.throwIfTimedOutOrAborted();
 
-      return response;
+        const response = await candidate.complete({
+          systemPrompt: params.systemPrompt,
+          userPrompt: params.userPrompt,
+          signal: combinedSignal.signal,
+          timeoutMs: params.timeoutMs,
+          thinkingLevel: params.model.thinkingLevel,
+        });
+
+        combinedSignal.throwIfTimedOutOrAborted();
+
+        if (typeof response !== "string") {
+          throw new Error(`Reviewer model returned a non-string response: ${modelLabel}`);
+        }
+
+        return response;
+      } catch (error) {
+        combinedSignal.throwIfTimedOutOrAborted();
+        throw error;
+      } finally {
+        combinedSignal.cleanup();
+      }
     },
   };
 }

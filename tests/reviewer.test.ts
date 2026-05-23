@@ -374,7 +374,7 @@ describe("createModelClientFromContext", () => {
     expect(complete).toHaveBeenCalledWith({
       systemPrompt: "system",
       userPrompt: "user",
-      signal: undefined,
+      signal: expect.any(AbortSignal),
       timeoutMs: 1000,
       thinkingLevel: "high",
     });
@@ -485,7 +485,7 @@ describe("createModelClientFromContext", () => {
     expect(complete).toHaveBeenCalledWith({
       systemPrompt: "system",
       userPrompt: "user",
-      signal,
+      signal: expect.any(AbortSignal),
       timeoutMs: 1234,
       thinkingLevel: "high",
     });
@@ -541,5 +541,325 @@ describe("createModelClientFromContext", () => {
         userPrompt: "custom user",
       }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Timeout and signal tests (Step 11.3)
+// ---------------------------------------------------------------------------
+
+describe("createModelClientFromContext timeout", () => {
+  it("rejects when the reviewer model request times out", async () => {
+    const complete = vi.fn(
+      (params: { signal?: AbortSignal }) =>
+        new Promise<string>((_resolve, reject) => {
+          params.signal?.addEventListener("abort", () => {
+            reject(new Error("aborted"));
+          });
+        }),
+    );
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await expect(
+      client.complete({
+        ...completionParams,
+        timeoutMs: 10,
+      }),
+    ).rejects.toThrow("Reviewer model request timed out after 10ms.");
+
+    // The signal passed to the model should be aborted after timeout.
+    const call = complete.mock.calls[0]?.[0] as { signal?: AbortSignal } | undefined;
+    expect(call?.signal?.aborted).toBe(true);
+  });
+
+  it("cleans up timer when the call resolves before timeout", async () => {
+    const complete = vi.fn(async () => "review result");
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await client.complete({
+      ...completionParams,
+      timeoutMs: 1000,
+    });
+
+    expect(complete).toHaveBeenCalled();
+  });
+
+  it("cleans up timer when the call rejects before timeout", async () => {
+    const complete = vi.fn(async () => {
+      throw new Error("model failure");
+    });
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await expect(
+      client.complete({
+        ...completionParams,
+        timeoutMs: 1000,
+      }),
+    ).rejects.toThrow("model failure");
+  });
+
+  it("does not create abort by timeout when timeoutMs is zero", async () => {
+    const complete = vi.fn(async () => "review result");
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await client.complete({
+      ...completionParams,
+      timeoutMs: 0,
+    });
+
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 0 }));
+  });
+
+  it("does not create abort by timeout when timeoutMs is negative", async () => {
+    const complete = vi.fn(async () => "review result");
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await client.complete({
+      ...completionParams,
+      timeoutMs: -1,
+    });
+
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: -1 }));
+  });
+
+  it("does not create abort by timeout when timeoutMs is NaN", async () => {
+    const complete = vi.fn(async () => "review result");
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await client.complete({
+      ...completionParams,
+      timeoutMs: NaN,
+    });
+
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: NaN }));
+  });
+
+  it("does not create abort by timeout when timeoutMs is not an integer", async () => {
+    const complete = vi.fn(async () => "review result");
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await client.complete({
+      ...completionParams,
+      timeoutMs: 100.5,
+    });
+
+    expect(complete).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: 100.5 }));
+  });
+});
+
+describe("createModelClientFromContext external signal", () => {
+  it("does not call the model when the external signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    const complete = vi.fn(async () => "review result");
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await expect(
+      client.complete({
+        ...completionParams,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow("Reviewer model request was aborted.");
+
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it("aborts the signal passed to the model when the external signal aborts", async () => {
+    const controller = new AbortController();
+    let capturedSignal: AbortSignal | undefined;
+    const complete = vi.fn((params: { signal?: AbortSignal }) => {
+      capturedSignal = params.signal;
+      return new Promise<string>((_resolve, reject) => {
+        params.signal?.addEventListener("abort", () => {
+          reject(new Error("candidate aborted"));
+        });
+      });
+    });
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    const promise = client.complete({
+      ...completionParams,
+      signal: controller.signal,
+      timeoutMs: 1000,
+    });
+
+    // Wait for the combined signal to be created and the model to be called.
+    // Use a real timer delay to let all pending microtasks complete.
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+    controller.abort();
+
+    await expect(promise).rejects.toThrow();
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+
+  it("removes the external signal listener after success", async () => {
+    const controller = new AbortController();
+    const complete = vi.fn(async () => "review result");
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await client.complete({
+      ...completionParams,
+      signal: controller.signal,
+    });
+
+    // If cleanup didn't remove the listener, aborting after completion
+    // would have listeners still registered, but since we can't easily
+    // check listener count in all runtimes, we verify no errors occur.
+    controller.abort();
+    expect(complete).toHaveBeenCalled();
+  });
+
+  it("removes the external signal listener after error", async () => {
+    const controller = new AbortController();
+    const complete = vi.fn(async () => {
+      throw new Error("model failure");
+    });
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await expect(
+      client.complete({
+        ...completionParams,
+        signal: controller.signal,
+      }),
+    ).rejects.toThrow("model failure");
+
+    // Listener should be cleaned up — aborting now should have no effect.
+    controller.abort();
+    expect(complete).toHaveBeenCalled();
+  });
+
+  it("removes the external signal listener after timeout", async () => {
+    const controller = new AbortController();
+    const complete = vi.fn(
+      (params: { signal?: AbortSignal }) =>
+        new Promise<string>((_resolve, reject) => {
+          params.signal?.addEventListener("abort", () => {
+            reject(new Error("aborted"));
+          });
+        }),
+    );
+
+    const client = createModelClientFromContext({
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    });
+
+    await expect(
+      client.complete({
+        ...completionParams,
+        signal: controller.signal,
+        timeoutMs: 10,
+      }),
+    ).rejects.toThrow("Reviewer model request timed out after 10ms.");
+
+    // Listener should be cleaned up — aborting the external controller
+    // after the internal timeout has already fired should be harmless.
+    controller.abort();
   });
 });
