@@ -5,9 +5,17 @@
   "type": "module",
   "main": "./src/index.ts",
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
-  "scripts": {},
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {},
-  "devDependencies": {}
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "link:/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent",
+    "@types/node": "latest",
+    "typescript": "latest"
+  }
 }
