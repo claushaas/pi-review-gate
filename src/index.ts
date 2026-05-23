@@ -1,5 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { registerCommands } from "./commands";
+import { createRuntimeState } from "./state";
 
-export default function (_pi: ExtensionAPI) {
-  // Extension bootstrap will be implemented in later roadmap steps.
+export default function (pi: ExtensionAPI) {
+  const state = createRuntimeState();
+  registerCommands(pi, state);
 }
