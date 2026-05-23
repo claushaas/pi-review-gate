@@ -158,6 +158,35 @@ ${buildReviewContextSection(context)}
  * @param params.signal - Optional `AbortSignal` to cancel the request.
  * @returns A fully validated `ReviewGateResult`.
  */
+// ---------------------------------------------------------------------------
+// Private helper: buildInvalidReviewerResponseResult
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds a blocking {@link ReviewGateResult} to use when the reviewer model
+ * returns a response that cannot be parsed as a valid review result.
+ *
+ * This result never approves the delivery — it signals that the review
+ * process itself failed and must be retried.
+ */
+function buildInvalidReviewerResponseResult(error: string): ReviewGateResult {
+  return {
+    approved: false,
+    severity: "blocking",
+    summary: "Reviewer returned an invalid response.",
+    requiredCorrections: [
+      "The reviewer response could not be parsed as a valid ReviewGateResult. Re-run the review after ensuring the reviewer model returns JSON only.",
+    ],
+    recommendedCorrections: ["Check the reviewer model configuration and prompt compliance."],
+    evidence: [`Invalid reviewer response: ${error}`],
+    confidence: "high",
+  };
+}
+
+// ---------------------------------------------------------------------------
+// runReviewer
+// ---------------------------------------------------------------------------
+
 export async function runReviewer(params: {
   config: ReviewGateConfig;
   reviewContext: ReviewContext;
@@ -184,6 +213,9 @@ export async function runReviewer(params: {
   const parsed = safeParseReviewGateResult(rawResponse);
 
   if (!parsed.ok) {
+    if (config.reviewer.failClosedOnInvalidJson) {
+      return buildInvalidReviewerResponseResult(parsed.error);
+    }
     throw new Error(`Invalid reviewer response: ${parsed.error}`);
   }
 

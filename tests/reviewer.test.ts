@@ -1000,21 +1000,27 @@ describe("runReviewer", () => {
     expect(modelClient.complete).not.toHaveBeenCalled();
   });
 
-  it("fails when reviewer response is invalid JSON", async () => {
+  it("fails when reviewer response is invalid JSON (fail-open)", async () => {
     const modelClient: ModelClient = {
       complete: vi.fn(async () => "{ invalid json }"),
     };
 
     await expect(
       runReviewer({
-        config: configWithReviewerModel,
+        config: {
+          ...configWithReviewerModel,
+          reviewer: {
+            ...configWithReviewerModel.reviewer,
+            failClosedOnInvalidJson: false,
+          },
+        },
         reviewContext,
         modelClient,
       }),
     ).rejects.toThrow("Invalid reviewer response:");
   });
 
-  it("fails when reviewer response has invalid schema", async () => {
+  it("fails when reviewer response has invalid schema (fail-open)", async () => {
     const modelClient: ModelClient = {
       complete: vi.fn(async () =>
         JSON.stringify({
@@ -1026,7 +1032,13 @@ describe("runReviewer", () => {
 
     await expect(
       runReviewer({
-        config: configWithReviewerModel,
+        config: {
+          ...configWithReviewerModel,
+          reviewer: {
+            ...configWithReviewerModel.reviewer,
+            failClosedOnInvalidJson: false,
+          },
+        },
         reviewContext,
         modelClient,
       }),
@@ -1071,6 +1083,196 @@ describe("runReviewer", () => {
       },
       reviewer: {
         ...configWithReviewerModel.reviewer,
+      },
+    } as ReviewGateConfig;
+
+    const context = {
+      ...reviewContext,
+    };
+
+    const before = JSON.stringify({ config, context });
+
+    await runReviewer({
+      config,
+      reviewContext: context,
+      modelClient,
+    });
+
+    expect(JSON.stringify({ config, context })).toBe(before);
+  });
+
+  // --- failClosedOnInvalidJson policy ---
+
+  it("returns a blocking result for invalid JSON when failClosedOnInvalidJson is true", async () => {
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () => "{ invalid json }"),
+    };
+
+    const result = await runReviewer({
+      config: {
+        ...configWithReviewerModel,
+        reviewer: {
+          ...configWithReviewerModel.reviewer,
+          failClosedOnInvalidJson: true,
+        },
+      },
+      reviewContext,
+      modelClient,
+    });
+
+    expect(result.approved).toBe(false);
+    expect(result.severity).toBe("blocking");
+    expect(result.summary).toBe("Reviewer returned an invalid response.");
+    expect(result.requiredCorrections.length).toBeGreaterThan(0);
+    expect(result.recommendedCorrections.length).toBeGreaterThan(0);
+    expect(result.evidence[0]).toMatch(/^Invalid reviewer response:/);
+    expect(result.confidence).toBe("high");
+  });
+
+  it("returns a blocking result for invalid schema when failClosedOnInvalidJson is true", async () => {
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () =>
+        JSON.stringify({
+          approved: true,
+          severity: "critical",
+        }),
+      ),
+    };
+
+    const result = await runReviewer({
+      config: {
+        ...configWithReviewerModel,
+        reviewer: {
+          ...configWithReviewerModel.reviewer,
+          failClosedOnInvalidJson: true,
+        },
+      },
+      reviewContext,
+      modelClient,
+    });
+
+    expect(result.approved).toBe(false);
+    expect(result.severity).toBe("blocking");
+    expect(result.summary).toBe("Reviewer returned an invalid response.");
+    expect(result.evidence[0]).toMatch(/^Invalid reviewer response:/);
+  });
+
+  it("throws for invalid JSON when failClosedOnInvalidJson is false", async () => {
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () => "{ invalid json }"),
+    };
+
+    await expect(
+      runReviewer({
+        config: {
+          ...configWithReviewerModel,
+          reviewer: {
+            ...configWithReviewerModel.reviewer,
+            failClosedOnInvalidJson: false,
+          },
+        },
+        reviewContext,
+        modelClient,
+      }),
+    ).rejects.toThrow("Invalid reviewer response:");
+  });
+
+  it("throws for invalid schema when failClosedOnInvalidJson is false", async () => {
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () =>
+        JSON.stringify({
+          approved: true,
+          severity: "critical",
+        }),
+      ),
+    };
+
+    await expect(
+      runReviewer({
+        config: {
+          ...configWithReviewerModel,
+          reviewer: {
+            ...configWithReviewerModel.reviewer,
+            failClosedOnInvalidJson: false,
+          },
+        },
+        reviewContext,
+        modelClient,
+      }),
+    ).rejects.toThrow("Invalid reviewer response:");
+  });
+
+  it("preserves valid approved reviewer results even when fail-closed is enabled", async () => {
+    const approvedResult = {
+      approved: true,
+      severity: "pass",
+      summary: "Delivery satisfies the request.",
+      requiredCorrections: [],
+      recommendedCorrections: [],
+      evidence: ["The reviewer returned valid JSON."],
+      confidence: "high",
+    } as const;
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () => JSON.stringify(approvedResult)),
+    };
+
+    await expect(
+      runReviewer({
+        config: {
+          ...configWithReviewerModel,
+          reviewer: {
+            ...configWithReviewerModel.reviewer,
+            failClosedOnInvalidJson: true,
+          },
+        },
+        reviewContext,
+        modelClient,
+      }),
+    ).resolves.toEqual(approvedResult);
+  });
+
+  it("preserves valid rejected reviewer results even when fail-closed is enabled", async () => {
+    const rejectedResult = {
+      approved: false,
+      severity: "blocking",
+      summary: "Required implementation is missing.",
+      requiredCorrections: ["Implement the missing behavior."],
+      recommendedCorrections: [],
+      evidence: ["The diff does not include the required code."],
+      confidence: "high",
+    } as const;
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () => JSON.stringify(rejectedResult)),
+    };
+
+    await expect(
+      runReviewer({
+        config: {
+          ...configWithReviewerModel,
+          reviewer: {
+            ...configWithReviewerModel.reviewer,
+            failClosedOnInvalidJson: true,
+          },
+        },
+        reviewContext,
+        modelClient,
+      }),
+    ).resolves.toEqual(rejectedResult);
+  });
+
+  it("does not mutate config or review context when handling invalid JSON", async () => {
+    const modelClient: ModelClient = {
+      complete: vi.fn(async () => "{ invalid json }"),
+    };
+
+    const config = {
+      ...configWithReviewerModel,
+      reviewer: {
+        ...configWithReviewerModel.reviewer,
+        failClosedOnInvalidJson: true,
+      },
+      reviewerModel: {
+        ...configWithReviewerModel.reviewerModel,
       },
     } as ReviewGateConfig;
 
