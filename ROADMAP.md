@@ -2184,60 +2184,60 @@ Confirmar hardening no ambiente real.
 
 ## 5. Ordem Recomendada de Execução
 
-- [ ] Step 1.1 — Criar estrutura do pacote
-- [ ] Step 1.2 — Criar entrypoint fino inicial
-- [ ] Step 2.1 — Configurar TypeScript
-- [ ] Step 2.2 — Configurar Biome
-- [ ] Step 2.3 — Configurar Vitest
-- [ ] Step 3.1 — Definir tipos centrais
-- [ ] Step 3.2 — Definir constantes globais
-- [ ] Step 4.1 — Definir `defaultConfig`
-- [ ] Step 4.2 — Implementar load, merge e save
-- [ ] Step 5.1 — Validar configuração
-- [ ] Step 5.2 — Validar `ReviewGateResult`
-- [ ] Step 5.3 — Implementar safe parse de JSON
-- [ ] Step 6.1 — Criar estado runtime
-- [ ] Step 6.2 — Detectar prompt injetado
-- [ ] Step 6.3 — Atualizar ciclo por prompt
-- [ ] Step 6.4 — Proteger contra reviews simultâneos
-- [ ] Step 7.1 — Extrair texto de mensagens
-- [ ] Step 7.2 — Serializar mensagens do ciclo atual
-- [ ] Step 7.3 — Serializar session entries
-- [ ] Step 8.1 — Extrair prompt atual e última resposta
-- [ ] Step 8.2 — Filtrar session slice
-- [ ] Step 8.3 — Montar `ReviewContext`
-- [ ] Step 9.1 — Executar comandos Git fixos
-- [ ] Step 9.2 — Tratar diretório não-Git
-- [ ] Step 9.3 — Truncar outputs Git
-- [ ] Step 10.1 — Implementar system prompt
-- [ ] Step 10.2 — Implementar user prompt com contexto
-- [ ] Step 11.1 — Definir `ModelClient`
-- [ ] Step 11.2 — Resolver modelo via registry do Pi
-- [ ] Step 11.3 — Aplicar timeout e signal
-- [ ] Step 12.1 — Implementar `runReviewer`
-- [ ] Step 12.2 — Tratar JSON inválido
-- [ ] Step 13.1 — Construir follow-up de correção
-- [ ] Step 13.2 — Garantir separação de responsabilidades
-- [ ] Step 14.1 — Persistir resultado do review
-- [ ] Step 14.2 — Persistir skips e falha final
-- [ ] Step 15.1 — Implementar early returns
-- [ ] Step 15.2 — Orquestrar review aprovado
-- [ ] Step 15.3 — Orquestrar reprovação em modo `block`
-- [ ] Step 15.4 — Orquestrar reprovação em modo `warn`
-- [ ] Step 15.5 — Tratar limite máximo de ciclos
-- [ ] Step 16.1 — Registrar comandos
-- [ ] Step 16.2 — Implementar status, on e off
-- [ ] Step 16.3 — Implementar seleção de modelo
-- [ ] Step 16.4 — Implementar menu `/review-gate`
-- [ ] Step 17.1 — Tratar falha de Git sem reprovar automaticamente
-- [ ] Step 17.2 — Tratar falha de modelo e timeout
-- [ ] Step 17.3 — Tratar JSON inválido no fluxo completo
-- [ ] Step 18.1 — Criar mocks inline do Pi runtime
-- [ ] Step 18.2 — Cobrir matriz de decisão
-- [ ] Step 18.3 — Consolidar suíte obrigatória
-- [ ] Step 19.1 — Escrever README operacional
-- [ ] Step 19.2 — Finalizar exemplo de config
-- [ ] Step 20.1 — Validar carregamento e comandos
+- [x] Step 1.1 — Criar estrutura do pacote
+- [x] Step 1.2 — Criar entrypoint fino inicial
+- [x] Step 2.1 — Configurar TypeScript
+- [x] Step 2.2 — Configurar Biome
+- [x] Step 2.3 — Configurar Vitest
+- [x] Step 3.1 — Definir tipos centrais
+- [x] Step 3.2 — Definir constantes globais
+- [x] Step 4.1 — Definir `defaultConfig`
+- [x] Step 4.2 — Implementar load, merge e save
+- [x] Step 5.1 — Validar configuração
+- [x] Step 5.2 — Validar `ReviewGateResult`
+- [x] Step 5.3 — Implementar safe parse de JSON
+- [x] Step 6.1 — Criar estado runtime
+- [x] Step 6.2 — Detectar prompt injetado
+- [x] Step 6.3 — Atualizar ciclo por prompt
+- [x] Step 6.4 — Proteger contra reviews simultâneos
+- [x] Step 7.1 — Extrair texto de mensagens
+- [x] Step 7.2 — Serializar mensagens do ciclo atual
+- [x] Step 7.3 — Serializar session entries
+- [x] Step 8.1 — Extrair prompt atual e última resposta
+- [x] Step 8.2 — Filtrar session slice
+- [x] Step 8.3 — Montar `ReviewContext`
+- [x] Step 9.1 — Executar comandos Git fixos
+- [x] Step 9.2 — Tratar diretório não-Git
+- [x] Step 9.3 — Truncar outputs Git
+- [x] Step 10.1 — Implementar system prompt
+- [x] Step 10.2 — Implementar user prompt com contexto
+- [x] Step 11.1 — Definir `ModelClient`
+- [x] Step 11.2 — Resolver modelo via registry do Pi
+- [x] Step 11.3 — Aplicar timeout e signal
+- [x] Step 12.1 — Implementar `runReviewer`
+- [x] Step 12.2 — Tratar JSON inválido
+- [x] Step 13.1 — Construir follow-up de correção
+- [x] Step 13.2 — Garantir separação de responsabilidades
+- [x] Step 14.1 — Persistir resultado do review
+- [x] Step 14.2 — Persistir skips e falha final
+- [x] Step 15.1 — Implementar early returns
+- [x] Step 15.2 — Orquestrar review aprovado
+- [x] Step 15.3 — Orquestrar reprovação em modo `block`
+- [x] Step 15.4 — Orquestrar reprovação em modo `warn`
+- [x] Step 15.5 — Tratar limite máximo de ciclos
+- [x] Step 16.1 — Registrar comandos
+- [x] Step 16.2 — Implementar status, on e off
+- [x] Step 16.3 — Implementar seleção de modelo
+- [x] Step 16.4 — Implementar menu `/review-gate`
+- [x] Step 17.1 — Tratar falha de Git sem reprovar automaticamente
+- [x] Step 17.2 — Tratar falha de modelo e timeout
+- [x] Step 17.3 — Tratar JSON inválido no fluxo completo
+- [x] Step 18.1 — Criar mocks inline do Pi runtime
+- [x] Step 18.2 — Cobrir matriz de decisão
+- [x] Step 18.3 — Consolidar suíte obrigatória
+- [x] Step 19.1 — Escrever README operacional
+- [x] Step 19.2 — Finalizar exemplo de config
+- [x] Step 20.1 — Validar carregamento e comandos
 - [x] Step 20.2 — Validar fluxos aprovado e reprovado (checklist preparado em docs/manual-validation.md)
 - [x] Step 20.3 — Validar ciclos, Git e falhas (checklist preparado em docs/manual-validation.md)
 

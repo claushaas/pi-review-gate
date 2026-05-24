@@ -674,13 +674,15 @@ Opções:
 1. Show current config
 2. Enable review gate
 3. Disable review gate
-4. Select reviewer model
-5. Set reviewer thinking level
+4. Select reviewer model (interactive dialog when no args)
+5. Set reviewer thinking level (interactive dialog when no args)
 6. Set max correction cycles
 7. Toggle git diff
 8. Toggle session context
 9. Run manual review now
 ```
+
+Nas opções 4 e 5, chamar sem argumentos abre um diálogo `ctx.ui.select()` interativo. O usuário pode selecionar com ↑/↓ e Enter, ou cancelar com Escape. Chamar com argumentos configura diretamente, como antes.
 
 ### `/review-gate-status`
 

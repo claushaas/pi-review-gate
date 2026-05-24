@@ -1,3 +1,4 @@
+import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
   COMMAND_REVIEW_GATE,
   COMMAND_REVIEW_GATE_MODEL,
@@ -8,7 +9,7 @@ import {
 import type { ModelRegistryAPI, ModelRegistryCandidate } from "./model.js";
 import type { ReviewerModelConfig, ReviewGateConfig, ThinkingLevel } from "./types.js";
 
-type CommandHandler = (input?: unknown) => Promise<string | undefined> | string | undefined;
+type CommandHandler = (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 
 type ReviewGateCommandContext = {
   modelRegistry?: ModelRegistryAPI;
@@ -21,52 +22,24 @@ type CommandDefinition = {
 };
 
 export type ReviewGateCommandAPI = {
-  registerCommand?: (
+  registerCommand(
     name: string,
     options: {
       description?: string;
       handler: CommandHandler;
     },
-  ) => void;
-  command?: (
-    command: string,
-    handler: CommandHandler,
-    options?: {
-      description?: string;
-    },
-  ) => void;
-  commands?: {
-    register?: (
-      command: string,
-      handler: CommandHandler,
-      options?: {
-        description?: string;
-      },
-    ) => void;
-  };
+  ): void;
 };
 
+function toRuntimeCommandName(name: string): string {
+  return name.startsWith("/") ? name.slice(1) : name;
+}
+
 function registerCommand(pi: ReviewGateCommandAPI, definition: CommandDefinition): void {
-  if (pi.registerCommand) {
-    pi.registerCommand(definition.name, {
-      description: definition.description,
-      handler: definition.handler,
-    });
-    return;
-  }
-  if (pi.command) {
-    pi.command(definition.name, definition.handler, {
-      description: definition.description,
-    });
-    return;
-  }
-  if (pi.commands?.register) {
-    pi.commands.register(definition.name, definition.handler, {
-      description: definition.description,
-    });
-    return;
-  }
-  throw new Error("Pi command registration API is not available.");
+  pi.registerCommand(toRuntimeCommandName(definition.name), {
+    description: definition.description,
+    handler: definition.handler,
+  });
 }
 
 function createEnabledConfig(config: ReviewGateConfig, enabled: boolean): ReviewGateConfig {
@@ -113,19 +86,8 @@ function isThinkingLevel(value: string): value is ThinkingLevel {
   return (THINKING_LEVELS as readonly string[]).includes(value);
 }
 
-function extractCommandText(input: unknown): string {
-  if (typeof input === "string") {
-    return input.trim();
-  }
-  if (typeof input !== "object" || input === null) {
-    return "";
-  }
-  for (const key of ["args", "input", "text", "message", "content"] as const) {
-    if (key in input && typeof (input as Record<string, unknown>)[key] === "string") {
-      return ((input as Record<string, unknown>)[key] as string).trim();
-    }
-  }
-  return "";
+function extractCommandArgs(args: string): string {
+  return args.trim();
 }
 
 type ParseModelResult = { ok: true; model: ReviewerModelConfig } | { ok: false; error: string };
@@ -173,6 +135,21 @@ function parseModelSelection(text: string): ParseModelResult {
   };
 }
 
+async function getRegistryModels(
+  modelRegistry: ModelRegistryAPI,
+): Promise<ModelRegistryCandidate[] | null> {
+  if (modelRegistry.getAvailable) {
+    return await modelRegistry.getAvailable();
+  }
+  if (modelRegistry.getModels) {
+    return await modelRegistry.getModels();
+  }
+  if (modelRegistry.getAll) {
+    return await modelRegistry.getAll();
+  }
+  return null;
+}
+
 async function findModelCandidate(params: {
   modelRegistry: ModelRegistryAPI;
   provider: string;
@@ -185,22 +162,20 @@ async function findModelCandidate(params: {
     return candidate ?? null;
   }
 
-  if (!modelRegistry.getModels) {
-    return null;
-  }
+  const models = await getRegistryModels(modelRegistry);
+  return (
+    models?.find((candidate) => candidate.provider === provider && candidate.id === id) ?? null
+  );
+}
 
-  const models = await modelRegistry.getModels();
-  return models.find((candidate) => candidate.provider === provider && candidate.id === id) ?? null;
+function formatModelLabel(model: ModelRegistryCandidate): string {
+  const label = `${model.provider ?? "?"}/${model.id ?? "?"}`;
+  const suffix = model.name ? ` — ${model.name}` : "";
+  return `${label}${suffix}`;
 }
 
 function formatAvailableModels(models: ModelRegistryCandidate[]): string {
-  return models
-    .map((model, index) => {
-      const label = `${model.provider ?? "?"}/${model.id ?? "?"}`;
-      const suffix = model.name ? ` — ${model.name}` : "";
-      return `${index + 1}. ${label}${suffix}`;
-    })
-    .join("\n");
+  return models.map((model, index) => `${index + 1}. ${formatModelLabel(model)}`).join("\n");
 }
 
 function formatReviewerModelSetMessage(model: ReviewerModelConfig): string {
@@ -209,10 +184,10 @@ function formatReviewerModelSetMessage(model: ReviewerModelConfig): string {
 }
 
 async function listReviewerModels(modelRegistry: ModelRegistryAPI): Promise<string> {
-  if (!modelRegistry.getModels) {
+  const models = await getRegistryModels(modelRegistry);
+  if (models === null) {
     return "Model registry does not support listing models.";
   }
-  const models = await modelRegistry.getModels();
   if (models.length === 0) {
     return "No models available in registry.";
   }
@@ -223,45 +198,105 @@ Use:
 ${modelsList}`;
 }
 
+function modelCandidateToId(model: ModelRegistryCandidate): string {
+  return `${model.provider ?? "?"}/${model.id ?? "?"}`;
+}
+
+function modelCandidateToLabel(model: ModelRegistryCandidate): string {
+  const id = modelCandidateToId(model);
+  const suffix = model.name ? ` — ${model.name}` : "";
+  return `${id}${suffix}`;
+}
+
+function getModelRegistry(
+  context: ReviewGateCommandContext | undefined,
+  ctx: ExtensionCommandContext,
+): ModelRegistryAPI | undefined {
+  return (ctx.modelRegistry as unknown as ModelRegistryAPI | undefined) ?? context?.modelRegistry;
+}
+
 async function handleReviewGateModel(params: {
   loadConfig: () => Promise<ReviewGateConfig>;
   saveConfig: (config: ReviewGateConfig) => Promise<void>;
   context?: ReviewGateCommandContext;
-  input?: unknown;
-}): Promise<string> {
-  const { loadConfig, saveConfig, context, input } = params;
-  const text = extractCommandText(input);
+  args: string;
+  ctx: ExtensionCommandContext;
+}): Promise<void> {
+  const { loadConfig, saveConfig, context, args, ctx } = params;
+  const text = extractCommandArgs(args);
 
   if (text.length === 0) {
-    const registry = context?.modelRegistry;
+    const registry = getModelRegistry(context, ctx);
     if (!registry) {
-      return "Model registry is not available.";
+      ctx.ui.notify("Model registry is not available.");
+      return;
     }
-    return await listReviewerModels(registry);
+    const models = await getRegistryModels(registry);
+    if (models === null) {
+      ctx.ui.notify("Model registry does not support listing models.");
+      return;
+    }
+    if (models.length === 0) {
+      ctx.ui.notify("No models available in registry.");
+      return;
+    }
+
+    const choice = await ctx.ui.select(
+      "Select reviewer model:",
+      models.map((model) => modelCandidateToId(model)),
+    );
+
+    if (choice === null || choice === undefined) {
+      return;
+    }
+
+    await applyModelSelection({
+      modelSpec: String(choice),
+      loadConfig,
+      saveConfig,
+      context,
+      ctx,
+    });
+    return;
   }
 
-  const parsed = parseModelSelection(text);
+  await applyModelSelection({
+    modelSpec: text,
+    loadConfig,
+    saveConfig,
+    context,
+    ctx,
+  });
+}
+
+async function applyModelSelection(params: {
+  modelSpec: string;
+  loadConfig: () => Promise<ReviewGateConfig>;
+  saveConfig: (config: ReviewGateConfig) => Promise<void>;
+  context?: ReviewGateCommandContext;
+  ctx: ExtensionCommandContext;
+}): Promise<void> {
+  const { modelSpec, loadConfig, saveConfig, context, ctx } = params;
+
+  const parsed = parseModelSelection(modelSpec);
   if (!parsed.ok) {
-    if (parsed.error === "missing") {
-      const registry = context?.modelRegistry;
-      if (!registry) {
-        return "Model registry is not available.";
-      }
-      return await listReviewerModels(registry);
-    }
-    return parsed.error;
+    ctx.ui.notify(parsed.error);
+    return;
   }
 
-  const registry = context?.modelRegistry;
+  const registry = getModelRegistry(context, ctx);
   if (registry) {
     const candidate = await findModelCandidate({
       modelRegistry: registry,
       provider: parsed.model.provider,
       id: parsed.model.id,
     });
-    const canValidate = Boolean(registry.find || registry.getModels);
+    const canValidate = Boolean(
+      registry.find || registry.getAvailable || registry.getModels || registry.getAll,
+    );
     if (canValidate && candidate === null) {
-      return `Reviewer model not found: ${parsed.model.provider}/${parsed.model.id}`;
+      ctx.ui.notify(`Reviewer model not found: ${parsed.model.provider}/${parsed.model.id}`);
+      return;
     }
   }
 
@@ -270,7 +305,7 @@ async function handleReviewGateModel(params: {
     ...config,
     reviewerModel: parsed.model,
   });
-  return formatReviewerModelSetMessage(parsed.model);
+  ctx.ui.notify(formatReviewerModelSetMessage(parsed.model));
 }
 
 // ---------------------------------------------------------------------------
@@ -293,8 +328,9 @@ Session context: ${sessionContextStatus}
 /review-gate status
 /review-gate on
 /review-gate off
-/review-gate model
+/review-gate model              (interactive picker when no args)
 /review-gate model <provider>/<id> [thinkingLevel]
+/review-gate thinking           (interactive picker when no args)
 /review-gate thinking <thinkingLevel>
 /review-gate max-cycles <number>
 /review-gate toggle-git-diff
@@ -331,13 +367,27 @@ async function handleReviewGateThinking(
   thinkingLevelRaw: string,
   loadConfig: () => Promise<ReviewGateConfig>,
   saveConfig: (config: ReviewGateConfig) => Promise<void>,
-): Promise<string> {
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  if (thinkingLevelRaw.length === 0) {
+    const choice = await ctx.ui.select("Select reviewer thinking level:", [...THINKING_LEVELS]);
+
+    if (choice === null || choice === undefined) {
+      return;
+    }
+    thinkingLevelRaw = String(choice);
+  }
+
   if (!isThinkingLevel(thinkingLevelRaw)) {
-    return "Invalid thinking level. Expected one of: off, minimal, low, medium, high, xhigh.";
+    ctx.ui.notify(
+      "Invalid thinking level. Expected one of: off, minimal, low, medium, high, xhigh.",
+    );
+    return;
   }
   const config = await loadConfig();
   if (config.reviewerModel === null) {
-    return "Reviewer model is not configured.";
+    ctx.ui.notify("Reviewer model is not configured.");
+    return;
   }
   await saveConfig({
     ...config,
@@ -346,16 +396,18 @@ async function handleReviewGateThinking(
       thinkingLevel: thinkingLevelRaw,
     },
   });
-  return `Reviewer thinking level set to ${thinkingLevelRaw}.`;
+  ctx.ui.notify(`Reviewer thinking level set to ${thinkingLevelRaw}.`);
 }
 
 async function handleReviewGateMaxCycles(
   value: string,
   loadConfig: () => Promise<ReviewGateConfig>,
   saveConfig: (config: ReviewGateConfig) => Promise<void>,
-): Promise<string> {
+  ctx: ExtensionCommandContext,
+): Promise<void> {
   if (!isPositiveIntegerText(value)) {
-    return "Invalid max correction cycles. Expected a positive integer.";
+    ctx.ui.notify("Invalid max correction cycles. Expected a positive integer.");
+    return;
   }
   const num = Number(value);
   const config = await loadConfig();
@@ -363,13 +415,14 @@ async function handleReviewGateMaxCycles(
     ...config,
     maxCorrectionCycles: num,
   });
-  return `Max correction cycles set to ${num}.`;
+  ctx.ui.notify(`Max correction cycles set to ${num}.`);
 }
 
 async function handleReviewGateToggleGitDiff(
   loadConfig: () => Promise<ReviewGateConfig>,
   saveConfig: (config: ReviewGateConfig) => Promise<void>,
-): Promise<string> {
+  ctx: ExtensionCommandContext,
+): Promise<void> {
   const config = await loadConfig();
   const newValue = !config.git.includeDiff;
   await saveConfig({
@@ -379,13 +432,14 @@ async function handleReviewGateToggleGitDiff(
       includeDiff: newValue,
     },
   });
-  return newValue ? "Git diff collection enabled." : "Git diff collection disabled.";
+  ctx.ui.notify(newValue ? "Git diff collection enabled." : "Git diff collection disabled.");
 }
 
 async function handleReviewGateToggleSessionContext(
   loadConfig: () => Promise<ReviewGateConfig>,
   saveConfig: (config: ReviewGateConfig) => Promise<void>,
-): Promise<string> {
+  ctx: ExtensionCommandContext,
+): Promise<void> {
   const config = await loadConfig();
   const newValue = !config.context.includeSessionSlice;
   await saveConfig({
@@ -395,7 +449,7 @@ async function handleReviewGateToggleSessionContext(
       includeSessionSlice: newValue,
     },
   });
-  return newValue ? "Session context enabled." : "Session context disabled.";
+  ctx.ui.notify(newValue ? "Session context enabled." : "Session context disabled.");
 }
 
 export function registerCommands(params: {
@@ -410,94 +464,106 @@ export function registerCommands(params: {
     {
       name: COMMAND_REVIEW_GATE,
       description: "Open review gate menu.",
-      handler: async (input?: unknown) => {
-        const text = extractCommandText(input);
+      handler: async (args: string, ctx: ExtensionCommandContext) => {
+        const text = extractCommandArgs(args);
         if (text.length === 0) {
           const config = await loadConfig();
-          return formatReviewGateMenu(config);
+          ctx.ui.notify(formatReviewGateMenu(config));
+          return;
         }
-        const { command, args } = parseReviewGateMenuInput(text);
+        const { command, args: subArgs } = parseReviewGateMenuInput(text);
 
         if (command === "status") {
           const config = await loadConfig();
-          return formatReviewGateStatus(config);
+          ctx.ui.notify(formatReviewGateStatus(config));
+          return;
         }
         if (command === "on") {
           const config = await loadConfig();
           const nextConfig = createEnabledConfig(config, true);
           await saveConfig(nextConfig);
-          return "Review gate enabled.";
+          ctx.ui.notify("Review gate enabled.");
+          return;
         }
         if (command === "off") {
           const config = await loadConfig();
           const nextConfig = createEnabledConfig(config, false);
           await saveConfig(nextConfig);
-          return "Review gate disabled.";
+          ctx.ui.notify("Review gate disabled.");
+          return;
         }
         if (command === "model") {
-          return await handleReviewGateModel({
+          await handleReviewGateModel({
             loadConfig,
             saveConfig,
             context,
-            input: args || undefined,
+            args: subArgs,
+            ctx,
           });
+          return;
         }
         if (command === "thinking") {
-          return await handleReviewGateThinking(args, loadConfig, saveConfig);
+          await handleReviewGateThinking(subArgs, loadConfig, saveConfig, ctx);
+          return;
         }
         if (command === "max-cycles") {
-          return await handleReviewGateMaxCycles(args, loadConfig, saveConfig);
+          await handleReviewGateMaxCycles(subArgs, loadConfig, saveConfig, ctx);
+          return;
         }
         if (command === "toggle-git-diff") {
-          return await handleReviewGateToggleGitDiff(loadConfig, saveConfig);
+          await handleReviewGateToggleGitDiff(loadConfig, saveConfig, ctx);
+          return;
         }
         if (command === "toggle-session-context") {
-          return await handleReviewGateToggleSessionContext(loadConfig, saveConfig);
+          await handleReviewGateToggleSessionContext(loadConfig, saveConfig, ctx);
+          return;
         }
         if (command === "manual") {
-          return "Manual review is not implemented yet.";
+          ctx.ui.notify("Manual review is not implemented yet.");
+          return;
         }
-        return "Unknown review gate command. Run /review-gate to see available commands.";
+        ctx.ui.notify("Unknown review gate command. Run /review-gate to see available commands.");
       },
     },
     {
       name: COMMAND_REVIEW_GATE_STATUS,
       description: "Show review gate status.",
-      handler: async () => {
+      handler: async (_args: string, ctx: ExtensionCommandContext) => {
         const config = await loadConfig();
-        return formatReviewGateStatus(config);
+        ctx.ui.notify(formatReviewGateStatus(config));
       },
     },
     {
       name: COMMAND_REVIEW_GATE_MODEL,
       description: "Configure reviewer model.",
-      handler: async (input?: unknown) => {
-        return await handleReviewGateModel({
+      handler: async (args: string, ctx: ExtensionCommandContext) => {
+        await handleReviewGateModel({
           loadConfig,
           saveConfig,
           context,
-          input,
+          args,
+          ctx,
         });
       },
     },
     {
       name: COMMAND_REVIEW_GATE_ON,
       description: "Enable review gate.",
-      handler: async () => {
+      handler: async (_args: string, ctx: ExtensionCommandContext) => {
         const config = await loadConfig();
         const nextConfig = createEnabledConfig(config, true);
         await saveConfig(nextConfig);
-        return "Review gate enabled.";
+        ctx.ui.notify("Review gate enabled.");
       },
     },
     {
       name: COMMAND_REVIEW_GATE_OFF,
       description: "Disable review gate.",
-      handler: async () => {
+      handler: async (_args: string, ctx: ExtensionCommandContext) => {
         const config = await loadConfig();
         const nextConfig = createEnabledConfig(config, false);
         await saveConfig(nextConfig);
-        return "Review gate disabled.";
+        ctx.ui.notify("Review gate disabled.");
       },
     },
   ];

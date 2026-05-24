@@ -1,3 +1,10 @@
+import {
+  type Api,
+  type AssistantMessage,
+  completeSimple,
+  type Model,
+  type ThinkingContent,
+} from "@earendil-works/pi-ai";
 import type { ReviewerModelConfig } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -87,6 +94,9 @@ export type ModelRegistryCandidate = {
   provider?: string;
   id?: string;
   name?: string;
+  reasoning?: boolean;
+  api?: unknown;
+  /** Test mock path: calls a mock complete method. When absent, the real Pi SDK `completeSimple` is used. */
   complete?: (params: {
     systemPrompt: string;
     userPrompt: string;
@@ -98,6 +108,8 @@ export type ModelRegistryCandidate = {
 
 export type ModelRegistryAPI = {
   getModels?: () => ModelRegistryCandidate[] | Promise<ModelRegistryCandidate[]>;
+  getAvailable?: () => ModelRegistryCandidate[] | Promise<ModelRegistryCandidate[]>;
+  getAll?: () => ModelRegistryCandidate[] | Promise<ModelRegistryCandidate[]>;
   find?: (
     provider: string,
     id: string,
@@ -132,6 +144,21 @@ export function createUnavailableModelClient(): ModelClient {
 // Private resolution helper
 // ---------------------------------------------------------------------------
 
+async function getRegistryModels(
+  modelRegistry: ModelRegistryAPI,
+): Promise<ModelRegistryCandidate[] | null> {
+  if (modelRegistry.getAvailable) {
+    return await modelRegistry.getAvailable();
+  }
+  if (modelRegistry.getModels) {
+    return await modelRegistry.getModels();
+  }
+  if (modelRegistry.getAll) {
+    return await modelRegistry.getAll();
+  }
+  return null;
+}
+
 async function resolveReviewerModel(params: {
   modelRegistry: ModelRegistryAPI;
   model: ReviewerModelConfig;
@@ -143,16 +170,74 @@ async function resolveReviewerModel(params: {
     return candidate ?? null;
   }
 
-  if (!modelRegistry.getModels) {
-    return null;
-  }
-
-  const models = await modelRegistry.getModels();
+  const models = await getRegistryModels(modelRegistry);
   return (
-    models.find(
+    models?.find(
       (candidate) => candidate.provider === model.provider && candidate.id === model.id,
     ) ?? null
   );
+}
+
+// ---------------------------------------------------------------------------
+// Response extraction helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts the concatenated text content from an {@link AssistantMessage}.
+ *
+ * Iterates over all content blocks generically. Prefers {@link TextContent}
+ * blocks. Falls back to {@link ThinkingContent} blocks (some reasoning-only
+ * models return their full response there with no separate text block).
+ *
+ * Returns an empty string when the message contains no extractable text.
+ */
+function extractAssistantText(message: AssistantMessage): string {
+  let textResult = "";
+  let thinkingResult = "";
+
+  for (const block of message.content) {
+    if (block.type === "text" && "text" in block && typeof block.text === "string") {
+      if (textResult.length > 0) {
+        textResult += "\n";
+      }
+      textResult += block.text;
+    } else if (
+      block.type === "thinking" &&
+      "thinking" in block &&
+      typeof block.thinking === "string"
+    ) {
+      if (thinkingResult.length > 0) {
+        thinkingResult += "\n";
+      }
+      thinkingResult += block.thinking;
+    }
+  }
+
+  if (textResult.length > 0) {
+    return textResult;
+  }
+
+  return thinkingResult;
+}
+
+/**
+ * Builds a diagnostic description of content blocks for error messages.
+ */
+function describeContentBlocks(message: AssistantMessage): string {
+  if (message.content.length === 0) {
+    return "no content blocks";
+  }
+  return message.content
+    .map((c, i) => {
+      const detail =
+        c.type === "text" && "text" in c
+          ? `len=${c.text.length}`
+          : c.type === "thinking" && "thinking" in c
+            ? `len=${c.thinking.length}${c.redacted ? ",redacted" : ""}${c.thinkingSignature ? `,sig=${c.thinkingSignature}` : ""}`
+            : "";
+      return `[${i}] type=${c.type} ${detail}`.trim();
+    })
+    .join("; ");
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +249,13 @@ async function resolveReviewerModel(params: {
  * provided {@link ModelClientContext.modelRegistry}.
  *
  * The resolution prefers {@link ModelRegistryAPI.find} and falls back to
- * {@link ModelRegistryAPI.getModels} when `find` is absent.
+ * registry listing methods when `find` is absent.
+ *
+ * Two invocation paths are supported:
+ * 1. **Test mock path:** the resolved candidate exposes a `complete` method
+ *    (used by tests).
+ * 2. **Real Pi SDK path:** the resolved candidate is a Pi {@link Model}
+ *    object; `completeSimple` from `@earendil-works/pi-ai` is used.
  *
  * @param context - The minimal context carrying an optional model registry.
  * @returns A `ModelClient` whose `complete` method resolves and invokes the
@@ -190,10 +281,6 @@ export function createModelClientFromContext(context: ModelClientContext): Model
         throw new Error(`Reviewer model not found: ${modelLabel}`);
       }
 
-      if (!candidate.complete) {
-        throw new Error(`Reviewer model does not expose a complete method: ${modelLabel}`);
-      }
-
       const combinedSignal = createCombinedSignal({
         signal: params.signal,
         timeoutMs: params.timeoutMs,
@@ -202,21 +289,65 @@ export function createModelClientFromContext(context: ModelClientContext): Model
       try {
         combinedSignal.throwIfTimedOutOrAborted();
 
-        const response = await candidate.complete({
-          systemPrompt: params.systemPrompt,
-          userPrompt: params.userPrompt,
-          signal: combinedSignal.signal,
-          timeoutMs: params.timeoutMs,
-          thinkingLevel: params.model.thinkingLevel,
-        });
+        // Test mock path: candidate exposes a `complete` method directly.
+        if (candidate.complete) {
+          const response = await candidate.complete({
+            systemPrompt: params.systemPrompt,
+            userPrompt: params.userPrompt,
+            signal: combinedSignal.signal,
+            timeoutMs: params.timeoutMs,
+            thinkingLevel: params.model.thinkingLevel,
+          });
+
+          combinedSignal.throwIfTimedOutOrAborted();
+
+          if (typeof response !== "string") {
+            throw new Error(`Reviewer model returned a non-string response: ${modelLabel}`);
+          }
+
+          return response;
+        }
+
+        // Real Pi SDK path: use completeSimple from @earendil-works/pi-ai.
+        const assistantMessage: AssistantMessage = await completeSimple(
+          candidate as Model<Api>,
+          {
+            systemPrompt: params.systemPrompt,
+            messages: [
+              {
+                role: "user",
+                content: [{ type: "text", text: params.userPrompt }],
+                timestamp: Date.now(),
+              },
+            ],
+          },
+          {
+            signal: combinedSignal.signal,
+            timeoutMs: params.timeoutMs,
+            ...(params.model.thinkingLevel && params.model.thinkingLevel !== "off"
+              ? {
+                  reasoning: params.model.thinkingLevel as
+                    | "minimal"
+                    | "low"
+                    | "medium"
+                    | "high"
+                    | "xhigh",
+                }
+              : {}),
+          },
+        );
 
         combinedSignal.throwIfTimedOutOrAborted();
 
-        if (typeof response !== "string") {
-          throw new Error(`Reviewer model returned a non-string response: ${modelLabel}`);
+        const textContents = extractAssistantText(assistantMessage);
+        if (textContents.length === 0) {
+          const blocks = describeContentBlocks(assistantMessage);
+          throw new Error(
+            `Reviewer model returned no text content: ${modelLabel}. Content blocks: ${blocks}`,
+          );
         }
 
-        return response;
+        return textContents;
       } catch (error) {
         combinedSignal.throwIfTimedOutOrAborted();
         throw error;

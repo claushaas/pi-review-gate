@@ -360,13 +360,15 @@ Deve abrir um menu interativo com opções:
 1. Show current config
 2. Enable review gate
 3. Disable review gate
-4. Select reviewer model
-5. Set reviewer thinking level
+4. Select reviewer model (diálogo interativo via ctx.ui.select quando sem args)
+5. Set reviewer thinking level (diálogo interativo via ctx.ui.select quando sem args)
 6. Set max correction cycles
 7. Toggle git diff
 8. Toggle session context
 9. Run manual review now
 ```
+
+**Seleção interativa:** quando `/review-gate model` ou `/review-gate thinking` são chamados sem argumentos, um diálogo `ctx.ui.select()` é aberto. O usuário seleciona com ↑/↓ e Enter, ou cancela com Escape. Com argumentos, a configuração é feita diretamente (fluxo antigo preservado).
 
 ---
 
@@ -390,15 +392,11 @@ Session strategy: current_run
 
 Atalho para seleção do modelo revisor.
 
-Deve listar modelos disponíveis via registry do Pi.
+**Quando chamado sem argumentos:** abre um diálogo interativo (`ctx.ui.select()`) listando todos os modelos disponíveis no registry. O usuário seleciona com ↑/↓ e Enter, ou cancela com Escape.
 
-Comportamento esperado:
+**Quando chamado com argumentos** (`/review-gate-model <provider>/<id> [thinkingLevel]`): configura o modelo diretamente, sem abrir o diálogo.
 
-```ts
-const models = ctx.modelRegistry.getModels?.() // API exata depende da implementação disponível
-```
-
-Caso a API pública disponível seja diferente, a extensão deve usar o mecanismo documentado do Pi para acessar `ctx.modelRegistry`.
+O modelo é validado contra o registry (via `find`, `getAvailable`, `getModels`, ou `getAll`) quando disponível. Se o modelo não for encontrado, uma mensagem de erro é exibida e a configuração não é salva.
 
 ---
 

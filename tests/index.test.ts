@@ -191,20 +191,35 @@ function createUiMock() {
   };
 }
 
+type CommandTestCtx = {
+  ui: { notify: ReturnType<typeof vi.fn>; select: ReturnType<typeof vi.fn> };
+};
+
+function toRuntimeCommandName(name: string): string {
+  return name.startsWith("/") ? name.slice(1) : name;
+}
+
 function getRegisteredCommandHandlers(
   registerCommand: ReturnType<typeof vi.fn>,
-): Map<string, (input?: unknown) => unknown> {
-  return new Map(registerCommand.mock.calls.map(([name, options]) => [name, options.handler]));
+): Map<string, (args: string, ctx: CommandTestCtx) => Promise<void>> {
+  const handlers = new Map<string, (args: string, ctx: CommandTestCtx) => Promise<void>>();
+  for (const [name, options] of registerCommand.mock.calls) {
+    handlers.set(name, options.handler);
+    handlers.set(`/${name}`, options.handler);
+  }
+  return handlers;
 }
 
 async function runCommandHandler(
-  handler: ((input?: unknown) => unknown) | undefined,
-  input?: unknown,
-): Promise<unknown> {
+  handler: ((args: string, ctx: CommandTestCtx) => Promise<void>) | undefined,
+  args?: string,
+): Promise<CommandTestCtx> {
   if (!handler) {
     throw new Error("Missing command handler.");
   }
-  return await Promise.resolve(handler(input));
+  const ctx: CommandTestCtx = { ui: { notify: vi.fn(), select: vi.fn() } };
+  await handler(args ?? "", ctx);
+  return ctx;
 }
 
 function createConfigWithReviewerModel(
@@ -3691,11 +3706,11 @@ describe("registerCommands", () => {
 
     const commandNames = pi.registerCommand.mock.calls.map((call) => call[0]);
     expect(commandNames).toEqual([
-      COMMAND_REVIEW_GATE,
-      COMMAND_REVIEW_GATE_STATUS,
-      COMMAND_REVIEW_GATE_MODEL,
-      COMMAND_REVIEW_GATE_ON,
-      COMMAND_REVIEW_GATE_OFF,
+      toRuntimeCommandName(COMMAND_REVIEW_GATE),
+      toRuntimeCommandName(COMMAND_REVIEW_GATE_STATUS),
+      toRuntimeCommandName(COMMAND_REVIEW_GATE_MODEL),
+      toRuntimeCommandName(COMMAND_REVIEW_GATE_ON),
+      toRuntimeCommandName(COMMAND_REVIEW_GATE_OFF),
     ]);
 
     for (const call of pi.registerCommand.mock.calls) {
@@ -3715,38 +3730,6 @@ describe("registerCommands", () => {
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
-  it("registers commands using command fallback", () => {
-    const pi = {
-      command: vi.fn(),
-    };
-    registerCommands({ pi, loadConfig: vi.fn(), saveConfig: vi.fn() });
-
-    expect(pi.command).toHaveBeenCalledTimes(5);
-    expect(pi.command.mock.calls[0][0]).toBe(COMMAND_REVIEW_GATE);
-  });
-
-  it("registers commands using commands.register fallback", () => {
-    const pi = {
-      commands: {
-        register: vi.fn(),
-      },
-    };
-    registerCommands({ pi, loadConfig: vi.fn(), saveConfig: vi.fn() });
-
-    expect(pi.commands.register).toHaveBeenCalledTimes(5);
-    expect(pi.commands.register.mock.calls[0][0]).toBe(COMMAND_REVIEW_GATE);
-  });
-
-  it("throws when no command registration API is available", () => {
-    expect(() =>
-      registerCommands({
-        pi: {},
-        loadConfig: vi.fn(),
-        saveConfig: vi.fn(),
-      }),
-    ).toThrow("Pi command registration API is not available.");
-  });
-
   it("renders the main review gate menu by default", async () => {
     const loadConfig = vi.fn(async () => defaultConfig);
     const pi = {
@@ -3754,12 +3737,9 @@ describe("registerCommands", () => {
     };
     registerCommands({ pi, loadConfig, saveConfig: vi.fn() });
 
-    const handlersByCommand = new Map(
-      pi.registerCommand.mock.calls.map(([name, options]) => [name, options.handler]),
-    );
-
-    const output = await Promise.resolve(handlersByCommand.get(COMMAND_REVIEW_GATE)?.());
-    expect(output).toContain("# Review Gate");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("# Review Gate"));
   });
 });
 
@@ -3831,17 +3811,19 @@ describe("review gate status command", () => {
       saveConfig,
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
     expect(loadConfig).toHaveBeenCalledTimes(1);
     expect(saveConfig).not.toHaveBeenCalled();
-    expect(output).toContain("# Review Gate Status");
-    expect(output).toContain("Enabled: true");
-    expect(output).toContain("Mode: block");
-    expect(output).toContain("Reviewer model: [not configured]");
-    expect(output).toContain("Max correction cycles:");
-    expect(output).toContain("## Context");
-    expect(output).toContain("## Git");
-    expect(output).toContain("## Reviewer");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("# Review Gate Status"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Enabled: true"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Mode: block"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Reviewer model: [not configured]"),
+    );
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Max correction cycles:"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("## Context"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("## Git"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("## Reviewer"));
     expect(pi.exec).not.toHaveBeenCalled();
     expect(pi.appendEntry).not.toHaveBeenCalled();
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
@@ -3865,8 +3847,10 @@ describe("review gate status command", () => {
       saveConfig,
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
-    expect(output).toContain("Reviewer model: test-provider/test-model");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Reviewer model: test-provider/test-model"),
+    );
   });
 
   it("shows configured reviewer model and thinking level in status", async () => {
@@ -3888,8 +3872,10 @@ describe("review gate status command", () => {
       saveConfig,
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
-    expect(output).toContain("Reviewer model: test-provider/test-model (thinking: high)");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Reviewer model: test-provider/test-model (thinking: high)"),
+    );
   });
 
   it("shows disabled status correctly", async () => {
@@ -3908,9 +3894,9 @@ describe("review gate status command", () => {
       saveConfig,
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
-    expect(output).toContain("Enabled: false");
-    expect(output).toContain("Mode: warn");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Enabled: false"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Mode: warn"));
   });
 
   it("does not call saveConfig", async () => {
@@ -3970,8 +3956,8 @@ describe("review gate on command", () => {
       saveConfig,
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
-    expect(output).toBe("Review gate enabled.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Review gate enabled.");
     expect(loadConfig).toHaveBeenCalledTimes(1);
     expect(saveConfig).toHaveBeenCalledTimes(1);
     expect(saveConfig).toHaveBeenCalledWith({
@@ -4070,8 +4056,8 @@ describe("review gate off command", () => {
       saveConfig,
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
-    expect(output).toBe("Review gate disabled.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Review gate disabled.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       enabled: false,
@@ -4126,9 +4112,9 @@ describe("placeholder commands preservation", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
-    expect(output).toContain("# Review Gate");
-    expect(output).toContain("Status:");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("# Review Gate"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Status:"));
   });
 
   it("/review-gate-model returns model registry unavailable when no context", async () => {
@@ -4137,9 +4123,8 @@ describe("placeholder commands preservation", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    await expect(runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL))).resolves.toBe(
-      "Model registry is not available.",
-    );
+    const ctx_resolves = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    expect(ctx_resolves.ui.notify).toHaveBeenCalledWith("Model registry is not available.");
   });
 
   it("/review-gate-model does not call loadConfig or saveConfig", async () => {
@@ -4202,13 +4187,13 @@ describe("review gate model command — listing", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
-    expect(output).toBe("Model registry is not available.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Model registry is not available.");
     expect(loadConfig).not.toHaveBeenCalled();
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
-  it("returns listing not supported when registry has no getModels", async () => {
+  it("returns listing not supported when registry has no listing methods", async () => {
     const loadConfig = vi.fn(async () => defaultConfig);
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
@@ -4220,8 +4205,8 @@ describe("review gate model command — listing", () => {
       context: { modelRegistry },
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
-    expect(output).toBe("Model registry does not support listing models.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Model registry does not support listing models.");
   });
 
   it("returns no models when list is empty", async () => {
@@ -4238,12 +4223,16 @@ describe("review gate model command — listing", () => {
       context: { modelRegistry },
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
-    expect(output).toBe("No models available in registry.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    expect(ctx.ui.notify).toHaveBeenCalledWith("No models available in registry.");
   });
 
-  it("lists available reviewer models", async () => {
-    const loadConfig = vi.fn(async () => defaultConfig);
+  it("lists available reviewer models via select dialog", async () => {
+    const currentConfig: ReviewGateConfig = {
+      ...defaultConfig,
+      reviewerModel: null,
+    };
+    const loadConfig = vi.fn(async () => currentConfig);
     const saveConfig = vi.fn();
     const pi = {
       registerCommand: vi.fn(),
@@ -4272,17 +4261,60 @@ describe("review gate model command — listing", () => {
       context: { modelRegistry },
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
-    expect(output).toContain("# Available Reviewer Models");
-    expect(output).toContain("/review-gate-model <provider>/<id> [thinkingLevel]");
-    expect(output).toContain("1. test-provider/test-model — Test Model");
-    expect(output).toContain("2. openrouter/deepseek/deepseek-v3.2 — DeepSeek V3.2");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+
+    // Should open select dialog with model IDs
+    expect(ctx.ui.select).toHaveBeenCalledWith("Select reviewer model:", [
+      "test-provider/test-model",
+      "openrouter/deepseek/deepseek-v3.2",
+    ]);
+    // Without selection, no config save
     expect(loadConfig).not.toHaveBeenCalled();
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
-  it("lists models without names when name is absent", async () => {
-    const loadConfig = vi.fn(async () => defaultConfig);
+  it("lists models from command context model registry via select dialog", async () => {
+    const currentConfig: ReviewGateConfig = {
+      ...defaultConfig,
+      reviewerModel: null,
+    };
+    const loadConfig = vi.fn(async () => currentConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    const modelRegistry: ModelRegistryAPI = {
+      getAvailable: vi.fn(async () => [
+        {
+          provider: "test-provider",
+          id: "test-model",
+          name: "Test Model",
+        },
+      ]),
+    };
+    registerCommands({ pi, loadConfig, saveConfig });
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const handler = handlers.get(COMMAND_REVIEW_GATE_MODEL);
+    if (!handler) {
+      throw new Error("Missing command handler.");
+    }
+
+    const notify = vi.fn();
+    const select = vi.fn();
+    await handler("", {
+      ui: { notify, select },
+      modelRegistry,
+    } as unknown as CommandTestCtx);
+
+    expect(select).toHaveBeenCalledWith("Select reviewer model:", ["test-provider/test-model"]);
+    expect(loadConfig).not.toHaveBeenCalled();
+    expect(saveConfig).not.toHaveBeenCalled();
+  });
+
+  it("shows models without names in select dialog when name is absent", async () => {
+    const currentConfig: ReviewGateConfig = {
+      ...defaultConfig,
+      reviewerModel: null,
+    };
+    const loadConfig = vi.fn(async () => currentConfig);
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     const modelRegistry: ModelRegistryAPI = {
@@ -4295,9 +4327,112 @@ describe("review gate model command — listing", () => {
       context: { modelRegistry },
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
-    expect(output).toContain("1. p1/m1");
-    expect(output).not.toContain(" — ");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    expect(ctx.ui.select).toHaveBeenCalledWith("Select reviewer model:", ["p1/m1"]);
+    expect(loadConfig).not.toHaveBeenCalled();
+    expect(saveConfig).not.toHaveBeenCalled();
+  });
+
+  it("selects a model from the interactive dialog and saves config", async () => {
+    const currentConfig: ReviewGateConfig = {
+      ...defaultConfig,
+      reviewerModel: null,
+    };
+    const loadConfig = vi.fn(async () => currentConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    const modelRegistry: ModelRegistryAPI = {
+      getModels: vi.fn(async () => [
+        { provider: "test-provider", id: "test-model", name: "Test Model" },
+        { provider: "anthropic", id: "claude-sonnet-4-5", name: "Claude 4 Sonnet" },
+      ]),
+      find: vi.fn(async (provider: string, id: string) => {
+        if (provider === "anthropic" && id === "claude-sonnet-4-5") {
+          return { provider: "anthropic", id: "claude-sonnet-4-5", name: "Claude 4 Sonnet" };
+        }
+        return null;
+      }),
+    };
+    registerCommands({ pi, loadConfig, saveConfig, context: { modelRegistry } });
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const handler = handlers.get(COMMAND_REVIEW_GATE_MODEL);
+    if (!handler) {
+      throw new Error("Missing command handler.");
+    }
+
+    const notify = vi.fn();
+    const select = vi.fn(async () => "anthropic/claude-sonnet-4-5");
+    await handler("", {
+      ui: { notify, select },
+      modelRegistry,
+    } as unknown as CommandTestCtx);
+
+    expect(select).toHaveBeenCalledWith("Select reviewer model:", [
+      "test-provider/test-model",
+      "anthropic/claude-sonnet-4-5",
+    ]);
+    expect(saveConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reviewerModel: { provider: "anthropic", id: "claude-sonnet-4-5" },
+      }),
+    );
+    expect(notify).toHaveBeenCalledWith("Reviewer model set to anthropic/claude-sonnet-4-5.");
+  });
+
+  it("cancels when the select dialog returns null", async () => {
+    const loadConfig = vi.fn(async () => defaultConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    const modelRegistry: ModelRegistryAPI = {
+      getModels: vi.fn(async () => [
+        { provider: "test-provider", id: "test-model", name: "Test Model" },
+      ]),
+    };
+    registerCommands({ pi, loadConfig, saveConfig, context: { modelRegistry } });
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const handler = handlers.get(COMMAND_REVIEW_GATE_MODEL);
+    if (!handler) {
+      throw new Error("Missing command handler.");
+    }
+
+    const notify = vi.fn();
+    const select = vi.fn(async () => null);
+    await handler("", {
+      ui: { notify, select },
+      modelRegistry,
+    } as unknown as CommandTestCtx);
+
+    expect(select).toHaveBeenCalledWith("Select reviewer model:", ["test-provider/test-model"]);
+    expect(loadConfig).not.toHaveBeenCalled();
+    expect(saveConfig).not.toHaveBeenCalled();
+  });
+
+  it("cancels when the select dialog returns undefined", async () => {
+    const loadConfig = vi.fn(async () => defaultConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    const modelRegistry: ModelRegistryAPI = {
+      getModels: vi.fn(async () => [
+        { provider: "test-provider", id: "test-model", name: "Test Model" },
+      ]),
+    };
+    registerCommands({ pi, loadConfig, saveConfig, context: { modelRegistry } });
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const handler = handlers.get(COMMAND_REVIEW_GATE_MODEL);
+    if (!handler) {
+      throw new Error("Missing command handler.");
+    }
+
+    const notify = vi.fn();
+    const select = vi.fn(async () => undefined);
+    await handler("", {
+      ui: { notify, select },
+      modelRegistry,
+    } as unknown as CommandTestCtx);
+
+    expect(select).toHaveBeenCalledWith("Select reviewer model:", ["test-provider/test-model"]);
+    expect(loadConfig).not.toHaveBeenCalled();
+    expect(saveConfig).not.toHaveBeenCalled();
   });
 });
 
@@ -4326,11 +4461,11 @@ describe("review gate model command — selection", () => {
       saveConfig,
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(
+    const ctx = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "test-provider/test-model",
     );
-    expect(output).toBe("Reviewer model set to test-provider/test-model.");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Reviewer model set to test-provider/test-model.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       reviewerModel: {
@@ -4359,11 +4494,13 @@ describe("review gate model command — selection", () => {
       saveConfig,
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(
+    const ctx = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "test-provider/test-model high",
     );
-    expect(output).toBe("Reviewer model set to test-provider/test-model (thinking: high).");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Reviewer model set to test-provider/test-model (thinking: high).",
+    );
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       reviewerModel: {
@@ -4380,11 +4517,13 @@ describe("review gate model command — selection", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(
+    const ctx = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "test-provider/test-model off",
     );
-    expect(output).toBe("Reviewer model set to test-provider/test-model (thinking: off).");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Reviewer model set to test-provider/test-model (thinking: off).",
+    );
     expect(saveConfig).toHaveBeenCalledWith(
       expect.objectContaining({
         reviewerModel: {
@@ -4402,11 +4541,13 @@ describe("review gate model command — selection", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(
+    const ctx = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "openrouter/deepseek/deepseek-v3.2",
     );
-    expect(output).toBe("Reviewer model set to openrouter/deepseek/deepseek-v3.2.");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Reviewer model set to openrouter/deepseek/deepseek-v3.2.",
+    );
     expect(saveConfig).toHaveBeenCalledWith(
       expect.objectContaining({
         reviewerModel: {
@@ -4417,28 +4558,32 @@ describe("review gate model command — selection", () => {
     );
   });
 
-  it("parses model from object-style input", async () => {
+  it("parses model from string args", async () => {
     const loadConfig = vi.fn(async () => defaultConfig);
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL), {
-      args: "test-provider/test-model",
-    });
-    expect(output).toBe("Reviewer model set to test-provider/test-model.");
+    const ctx = await runCommandHandler(
+      handlers.get(COMMAND_REVIEW_GATE_MODEL),
+      "test-provider/test-model",
+    );
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Reviewer model set to test-provider/test-model.");
   });
 
-  it("parses model from object with input key", async () => {
+  it("parses model from string args with thinking level", async () => {
     const loadConfig = vi.fn(async () => defaultConfig);
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL), {
-      input: "test-provider/test-model minimal",
-    });
-    expect(output).toBe("Reviewer model set to test-provider/test-model (thinking: minimal).");
+    const ctx = await runCommandHandler(
+      handlers.get(COMMAND_REVIEW_GATE_MODEL),
+      "test-provider/test-model minimal",
+    );
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Reviewer model set to test-provider/test-model (thinking: minimal).",
+    );
   });
 
   it("rejects invalid reviewer model specs", async () => {
@@ -4455,7 +4600,8 @@ describe("review gate model command — selection", () => {
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
     const handler = handlers.get(COMMAND_REVIEW_GATE_MODEL);
     for (const input of ["openrouter", "/openrouter", "openrouter/", "/"]) {
-      await expect(runCommandHandler(handler, input)).resolves.toBe(
+      const ctx_resolves = await runCommandHandler(handler, input);
+      expect(ctx_resolves.ui.notify).toHaveBeenCalledWith(
         "Invalid reviewer model. Use /review-gate-model <provider>/<id> [thinkingLevel].",
       );
     }
@@ -4475,12 +4621,11 @@ describe("review gate model command — selection", () => {
       saveConfig,
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    await expect(
-      runCommandHandler(
-        handlers.get(COMMAND_REVIEW_GATE_MODEL),
-        "test-provider/test-model extreme",
-      ),
-    ).resolves.toBe(
+    const ctx_resolves = await runCommandHandler(
+      handlers.get(COMMAND_REVIEW_GATE_MODEL),
+      "test-provider/test-model extreme",
+    );
+    expect(ctx_resolves.ui.notify).toHaveBeenCalledWith(
       "Invalid thinking level. Expected one of: off, minimal, low, medium, high, xhigh.",
     );
     expect(saveConfig).not.toHaveBeenCalled();
@@ -4559,13 +4704,13 @@ describe("review gate model command — registry validation", () => {
       },
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(
+    const ctx = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "test-provider/test-model",
     );
     expect(modelRegistry.find).toHaveBeenCalledWith("test-provider", "test-model");
     expect(modelRegistry.getModels).not.toHaveBeenCalled();
-    expect(output).toBe("Reviewer model set to test-provider/test-model.");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Reviewer model set to test-provider/test-model.");
     expect(saveConfig).toHaveBeenCalled();
   });
 
@@ -4587,15 +4732,43 @@ describe("review gate model command — registry validation", () => {
       },
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(
+    const ctx = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "missing-provider/missing-model",
     );
-    expect(output).toBe("Reviewer model not found: missing-provider/missing-model");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Reviewer model not found: missing-provider/missing-model",
+    );
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
-  it("uses getModels fallback when find is unavailable", async () => {
+  it("uses getAvailable fallback when find is unavailable", async () => {
+    const currentConfig = {
+      ...defaultConfig,
+      reviewerModel: null,
+    };
+    const loadConfig = vi.fn(async () => currentConfig);
+    const saveConfig = vi.fn();
+    const modelRegistry: ModelRegistryAPI = {
+      getAvailable: vi.fn(async () => [{ provider: "test-provider", id: "test-model" }]),
+    };
+    const pi = { registerCommand: vi.fn() };
+    registerCommands({
+      pi,
+      loadConfig,
+      saveConfig,
+      context: { modelRegistry },
+    });
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const ctx = await runCommandHandler(
+      handlers.get(COMMAND_REVIEW_GATE_MODEL),
+      "test-provider/test-model",
+    );
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Reviewer model set to test-provider/test-model.");
+    expect(saveConfig).toHaveBeenCalled();
+  });
+
+  it("uses getModels fallback when find and getAvailable are unavailable", async () => {
     const currentConfig = {
       ...defaultConfig,
       reviewerModel: null,
@@ -4613,11 +4786,11 @@ describe("review gate model command — registry validation", () => {
       context: { modelRegistry },
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(
+    const ctx = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "test-provider/test-model",
     );
-    expect(output).toBe("Reviewer model set to test-provider/test-model.");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Reviewer model set to test-provider/test-model.");
     expect(saveConfig).toHaveBeenCalled();
   });
 
@@ -4635,11 +4808,13 @@ describe("review gate model command — registry validation", () => {
       context: { modelRegistry },
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(
+    const ctx = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "missing-provider/missing-model",
     );
-    expect(output).toBe("Reviewer model not found: missing-provider/missing-model");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Reviewer model not found: missing-provider/missing-model",
+    );
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
@@ -4659,11 +4834,11 @@ describe("review gate model command — registry validation", () => {
       context: { modelRegistry },
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(
+    const ctx = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "test-provider/test-model",
     );
-    expect(output).toBe("Reviewer model set to test-provider/test-model.");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Reviewer model set to test-provider/test-model.");
     expect(saveConfig).toHaveBeenCalled();
   });
 });
@@ -4679,9 +4854,9 @@ describe("command preservation after model implementation", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
-    expect(output).toContain("# Review Gate");
-    expect(output).toContain("/review-gate model");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("# Review Gate"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("/review-gate model"));
   });
 
   it("/review-gate-status works", async () => {
@@ -4690,8 +4865,8 @@ describe("command preservation after model implementation", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
-    expect(output).toContain("# Review Gate Status");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("# Review Gate Status"));
   });
 
   it("/review-gate-on works", async () => {
@@ -4703,8 +4878,8 @@ describe("command preservation after model implementation", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
-    expect(output).toBe("Review gate enabled.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Review gate enabled.");
   });
 
   it("/review-gate-off works", async () => {
@@ -4713,8 +4888,8 @@ describe("command preservation after model implementation", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
-    expect(output).toBe("Review gate disabled.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Review gate disabled.");
   });
 });
 
@@ -4793,23 +4968,35 @@ describe("review gate menu command", () => {
       saveConfig,
     });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
-    expect(output).toContain("# Review Gate");
-    expect(output).toContain("Status: enabled");
-    expect(output).toContain("Mode: block");
-    expect(output).toContain("Reviewer model: test-provider/test-model (thinking: high)");
-    expect(output).toContain("Max correction cycles: 2");
-    expect(output).toContain("Git diff: enabled");
-    expect(output).toContain("Session context: disabled");
-    expect(output).toContain("/review-gate status");
-    expect(output).toContain("/review-gate on");
-    expect(output).toContain("/review-gate off");
-    expect(output).toContain("/review-gate model");
-    expect(output).toContain("/review-gate thinking <thinkingLevel>");
-    expect(output).toContain("/review-gate max-cycles <number>");
-    expect(output).toContain("/review-gate toggle-git-diff");
-    expect(output).toContain("/review-gate toggle-session-context");
-    expect(output).toContain("/review-gate manual");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("# Review Gate"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Status: enabled"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Mode: block"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Reviewer model: test-provider/test-model (thinking: high)"),
+    );
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Max correction cycles: 2"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Git diff: enabled"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Session context: disabled"),
+    );
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("/review-gate status"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("/review-gate on"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("/review-gate off"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("/review-gate model"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("/review-gate thinking <thinkingLevel>"),
+    );
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("/review-gate max-cycles <number>"),
+    );
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("/review-gate toggle-git-diff"),
+    );
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("/review-gate toggle-session-context"),
+    );
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("/review-gate manual"));
     expect(saveConfig).not.toHaveBeenCalled();
     expect(pi.exec).not.toHaveBeenCalled();
     expect(pi.appendEntry).not.toHaveBeenCalled();
@@ -4835,12 +5022,14 @@ describe("review gate menu command", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
-    expect(output).toContain("Status: disabled");
-    expect(output).toContain("Mode: warn");
-    expect(output).toContain("Reviewer model: [not configured]");
-    expect(output).toContain("Git diff: disabled");
-    expect(output).toContain("Session context: enabled");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Status: disabled"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Mode: warn"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Reviewer model: [not configured]"),
+    );
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Git diff: disabled"));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Session context: enabled"));
   });
 
   it("shows reviewer model without thinking level", async () => {
@@ -4855,9 +5044,11 @@ describe("review gate menu command", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
-    expect(output).toContain("Reviewer model: test-provider/test-model");
-    expect(output).not.toContain("(thinking:");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      expect.stringContaining("Reviewer model: test-provider/test-model"),
+    );
+    expect(ctx.ui.notify.mock.calls[0][0]).not.toContain("(thinking:");
   });
 });
 
@@ -4877,8 +5068,8 @@ describe("review gate menu aliases", () => {
     };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "status");
-    expect(output).toContain("# Review Gate Status");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "status");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("# Review Gate Status"));
     expect(loadConfig).toHaveBeenCalled();
     expect(saveConfig).not.toHaveBeenCalled();
     expect(pi.exec).not.toHaveBeenCalled();
@@ -4895,8 +5086,8 @@ describe("review gate menu aliases", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "on");
-    expect(output).toBe("Review gate enabled.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "on");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Review gate enabled.");
     expect(saveConfig).toHaveBeenCalledWith(expect.objectContaining({ enabled: true }));
   });
 
@@ -4909,13 +5100,17 @@ describe("review gate menu aliases", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "off");
-    expect(output).toBe("Review gate disabled.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "off");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Review gate disabled.");
     expect(saveConfig).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
   });
 
-  it("routes model alias for listing through /review-gate", async () => {
-    const loadConfig = vi.fn(async () => defaultConfig);
+  it("routes model alias for selection through /review-gate select dialog", async () => {
+    const currentConfig: ReviewGateConfig = {
+      ...defaultConfig,
+      reviewerModel: null,
+    };
+    const loadConfig = vi.fn(async () => currentConfig);
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     const modelRegistry: ModelRegistryAPI = {
@@ -4925,8 +5120,10 @@ describe("review gate menu aliases", () => {
     };
     registerCommands({ pi, loadConfig, saveConfig, context: { modelRegistry } });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "model");
-    expect(output).toContain("# Available Reviewer Models");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "model");
+    expect(ctx.ui.select).toHaveBeenCalledWith("Select reviewer model:", [
+      "test-provider/test-model",
+    ]);
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
@@ -4940,11 +5137,13 @@ describe("review gate menu aliases", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(
+    const ctx = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE),
       "model test-provider/test-model high",
     );
-    expect(output).toBe("Reviewer model set to test-provider/test-model (thinking: high).");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Reviewer model set to test-provider/test-model (thinking: high).",
+    );
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       reviewerModel: {
@@ -4979,8 +5178,8 @@ describe("review gate thinking subcommand", () => {
     };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking high");
-    expect(output).toBe("Reviewer thinking level set to high.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking high");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Reviewer thinking level set to high.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       reviewerModel: {
@@ -5008,8 +5207,8 @@ describe("review gate thinking subcommand", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking medium");
-    expect(output).toBe("Reviewer thinking level set to medium.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking medium");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Reviewer thinking level set to medium.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       reviewerModel: {
@@ -5029,8 +5228,8 @@ describe("review gate thinking subcommand", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking high");
-    expect(output).toBe("Reviewer model is not configured.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking high");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Reviewer model is not configured.");
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
@@ -5040,8 +5239,8 @@ describe("review gate thinking subcommand", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking extreme");
-    expect(output).toBe(
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking extreme");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
       "Invalid thinking level. Expected one of: off, minimal, low, medium, high, xhigh.",
     );
     expect(saveConfig).not.toHaveBeenCalled();
@@ -5062,12 +5261,99 @@ describe("review gate thinking subcommand", () => {
       const pi = { registerCommand: vi.fn() };
       registerCommands({ pi, loadConfig, saveConfig });
       const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-      const output = await runCommandHandler(
-        handlers.get(COMMAND_REVIEW_GATE),
-        `thinking ${level}`,
-      );
-      expect(output).toBe(`Reviewer thinking level set to ${level}.`);
+      const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), `thinking ${level}`);
+      expect(ctx.ui.notify).toHaveBeenCalledWith(`Reviewer thinking level set to ${level}.`);
     }
+  });
+
+  it("shows select dialog when called without level", async () => {
+    const currentConfig: ReviewGateConfig = {
+      ...defaultConfig,
+      reviewerModel: {
+        provider: "test-provider",
+        id: "test-model",
+      },
+    };
+    const loadConfig = vi.fn(async () => currentConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    registerCommands({ pi, loadConfig, saveConfig });
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const handler = handlers.get(COMMAND_REVIEW_GATE);
+    if (!handler) {
+      throw new Error("Missing command handler.");
+    }
+
+    const notify = vi.fn();
+    const select = vi.fn(async () => "medium");
+    await handler("thinking", {
+      ui: { notify, select },
+    } as unknown as CommandTestCtx);
+
+    expect(select).toHaveBeenCalledWith("Select reviewer thinking level:", [
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ]);
+    expect(notify).toHaveBeenCalledWith("Reviewer thinking level set to medium.");
+    expect(saveConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+          thinkingLevel: "medium",
+        },
+      }),
+    );
+  });
+
+  it("cancels select dialog when user dismisses", async () => {
+    const loadConfig = vi.fn(async () => defaultConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    registerCommands({ pi, loadConfig, saveConfig });
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const handler = handlers.get(COMMAND_REVIEW_GATE);
+    if (!handler) {
+      throw new Error("Missing command handler.");
+    }
+
+    const notify = vi.fn();
+    const select = vi.fn(async () => null);
+    await handler("thinking", {
+      ui: { notify, select },
+    } as unknown as CommandTestCtx);
+
+    expect(select).toHaveBeenCalled();
+    expect(loadConfig).not.toHaveBeenCalled();
+    expect(saveConfig).not.toHaveBeenCalled();
+  });
+
+  it("still validates level when selected from dialog", async () => {
+    const loadConfig = vi.fn(async () => defaultConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    registerCommands({ pi, loadConfig, saveConfig });
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const handler = handlers.get(COMMAND_REVIEW_GATE);
+    if (!handler) {
+      throw new Error("Missing command handler.");
+    }
+
+    const notify = vi.fn();
+    // Simulate a selection returning something unexpected
+    const select = vi.fn(async () => "extreme");
+    await handler("thinking", {
+      ui: { notify, select },
+    } as unknown as CommandTestCtx);
+
+    expect(notify).toHaveBeenCalledWith(
+      "Invalid thinking level. Expected one of: off, minimal, low, medium, high, xhigh.",
+    );
+    expect(saveConfig).not.toHaveBeenCalled();
   });
 });
 
@@ -5091,8 +5377,8 @@ describe("review gate max-cycles subcommand", () => {
     };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 5");
-    expect(output).toBe("Max correction cycles set to 5.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 5");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Max correction cycles set to 5.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       maxCorrectionCycles: 5,
@@ -5127,8 +5413,10 @@ describe("review gate max-cycles subcommand", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 0");
-    expect(output).toBe("Invalid max correction cycles. Expected a positive integer.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 0");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Invalid max correction cycles. Expected a positive integer.",
+    );
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
@@ -5138,8 +5426,10 @@ describe("review gate max-cycles subcommand", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles -1");
-    expect(output).toBe("Invalid max correction cycles. Expected a positive integer.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles -1");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Invalid max correction cycles. Expected a positive integer.",
+    );
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
@@ -5149,8 +5439,10 @@ describe("review gate max-cycles subcommand", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 1.5");
-    expect(output).toBe("Invalid max correction cycles. Expected a positive integer.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 1.5");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Invalid max correction cycles. Expected a positive integer.",
+    );
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
@@ -5160,8 +5452,10 @@ describe("review gate max-cycles subcommand", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles abc");
-    expect(output).toBe("Invalid max correction cycles. Expected a positive integer.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles abc");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Invalid max correction cycles. Expected a positive integer.",
+    );
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
@@ -5173,7 +5467,8 @@ describe("review gate max-cycles subcommand", () => {
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
     const handler = handlers.get(COMMAND_REVIEW_GATE);
     for (const input of ["max-cycles 0", "max-cycles -1", "max-cycles 1.5", "max-cycles abc"]) {
-      await expect(runCommandHandler(handler, input)).resolves.toBe(
+      const ctx_resolves = await runCommandHandler(handler, input);
+      expect(ctx_resolves.ui.notify).toHaveBeenCalledWith(
         "Invalid max correction cycles. Expected a positive integer.",
       );
     }
@@ -5206,8 +5501,8 @@ describe("review gate toggle subcommands", () => {
     };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-git-diff");
-    expect(output).toBe("Git diff collection enabled.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-git-diff");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Git diff collection enabled.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       git: {
@@ -5235,8 +5530,8 @@ describe("review gate toggle subcommands", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-git-diff");
-    expect(output).toBe("Git diff collection disabled.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-git-diff");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Git diff collection disabled.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       git: {
@@ -5297,11 +5592,11 @@ describe("review gate toggle subcommands", () => {
     };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(
+    const ctx = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE),
       "toggle-session-context",
     );
-    expect(output).toBe("Session context disabled.");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Session context disabled.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       context: {
@@ -5329,11 +5624,11 @@ describe("review gate toggle subcommands", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(
+    const ctx = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE),
       "toggle-session-context",
     );
-    expect(output).toBe("Session context enabled.");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Session context enabled.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       context: {
@@ -5387,8 +5682,8 @@ describe("review gate manual placeholder", () => {
     };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "manual");
-    expect(output).toBe("Manual review is not implemented yet.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "manual");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Manual review is not implemented yet.");
     expect(loadConfig).not.toHaveBeenCalled();
     expect(saveConfig).not.toHaveBeenCalled();
     expect(pi.exec).not.toHaveBeenCalled();
@@ -5408,8 +5703,10 @@ describe("review gate unknown subcommand", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "unknown");
-    expect(output).toBe("Unknown review gate command. Run /review-gate to see available commands.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "unknown");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(
+      "Unknown review gate command. Run /review-gate to see available commands.",
+    );
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
@@ -5437,8 +5734,8 @@ describe("review gate direct command preservation", () => {
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
     expect(handlers.has(COMMAND_REVIEW_GATE_STATUS)).toBe(true);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
-    expect(output).toContain("# Review Gate Status");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("# Review Gate Status"));
   });
 
   it("preserves /review-gate-on", async () => {
@@ -5448,8 +5745,8 @@ describe("review gate direct command preservation", () => {
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
     expect(handlers.has(COMMAND_REVIEW_GATE_ON)).toBe(true);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
-    expect(output).toBe("Review gate enabled.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Review gate enabled.");
   });
 
   it("preserves /review-gate-off", async () => {
@@ -5459,8 +5756,8 @@ describe("review gate direct command preservation", () => {
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
     expect(handlers.has(COMMAND_REVIEW_GATE_OFF)).toBe(true);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
-    expect(output).toBe("Review gate disabled.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Review gate disabled.");
   });
 
   it("preserves /review-gate-model", async () => {
@@ -5470,8 +5767,8 @@ describe("review gate direct command preservation", () => {
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
     expect(handlers.has(COMMAND_REVIEW_GATE_MODEL)).toBe(true);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
-    expect(output).toBe("Model registry is not available.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Model registry is not available.");
   });
 
   it("registers all 5 commands", async () => {
@@ -5489,11 +5786,11 @@ describe("review gate direct command preservation", () => {
     expect(pi.registerCommand).toHaveBeenCalledTimes(5);
     const commandNames = pi.registerCommand.mock.calls.map((call) => call[0]);
     expect(commandNames).toEqual([
-      COMMAND_REVIEW_GATE,
-      COMMAND_REVIEW_GATE_STATUS,
-      COMMAND_REVIEW_GATE_MODEL,
-      COMMAND_REVIEW_GATE_ON,
-      COMMAND_REVIEW_GATE_OFF,
+      toRuntimeCommandName(COMMAND_REVIEW_GATE),
+      toRuntimeCommandName(COMMAND_REVIEW_GATE_STATUS),
+      toRuntimeCommandName(COMMAND_REVIEW_GATE_MODEL),
+      toRuntimeCommandName(COMMAND_REVIEW_GATE_ON),
+      toRuntimeCommandName(COMMAND_REVIEW_GATE_OFF),
     ]);
   });
 
@@ -5526,45 +5823,37 @@ describe("review gate object-style input", () => {
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), {
-      args: "status",
-    });
-    expect(output).toContain("# Review Gate Status");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "status");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("# Review Gate Status"));
   });
 
-  it("parses subcommand from object with input key", async () => {
+  it("parses subcommand from string args", async () => {
     const loadConfig = vi.fn(async () => defaultConfig);
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), {
-      input: "manual",
-    });
-    expect(output).toBe("Manual review is not implemented yet.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "manual");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Manual review is not implemented yet.");
   });
 
-  it("parses subcommand from object with text key", async () => {
+  it("enables review gate from subcommand string args", async () => {
     const loadConfig = vi.fn(async () => defaultConfig);
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), {
-      text: "on",
-    });
-    expect(output).toBe("Review gate enabled.");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "on");
+    expect(ctx.ui.notify).toHaveBeenCalledWith("Review gate enabled.");
   });
 
-  it("shows menu when object has no recognized keys", async () => {
+  it("shows menu for empty string args", async () => {
     const loadConfig = vi.fn(async () => defaultConfig);
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
     const handlers = getRegisteredCommandHandlers(pi.registerCommand);
-    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), {
-      foo: "bar",
-    });
-    expect(output).toContain("# Review Gate");
+    const ctx = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("# Review Gate"));
   });
 });

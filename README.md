@@ -125,8 +125,8 @@ The `reviewerModel` must be configured for review to run. When `reviewerModel` i
 |---------|-------------|
 | `/review-gate` | Open the review gate menu. |
 | `/review-gate-status` | Show current review gate configuration. |
-| `/review-gate-model` | List available models or set the reviewer model. |
-| `/review-gate-model <provider>/<id> [thinkingLevel]` | Set the reviewer model with optional thinking level. |
+| `/review-gate-model` | Opens an interactive selection dialog to choose the reviewer model. |
+| `/review-gate-model <provider>/<id> [thinkingLevel]` | Set the reviewer model directly with optional thinking level. |
 | `/review-gate-on` | Enable the review gate. |
 | `/review-gate-off` | Disable the review gate. |
 
@@ -139,9 +139,10 @@ These are invoked via `/review-gate <sub-command>`:
 | `status` | Alias for `/review-gate-status`. |
 | `on` | Alias for `/review-gate-on`. |
 | `off` | Alias for `/review-gate-off`. |
-| `model` | Alias for `/review-gate-model`. |
-| `model <provider>/<id> [thinkingLevel]` | Set reviewer model via menu. |
-| `thinking <thinkingLevel>` | Set thinking level on the already configured model. |
+| `model` | Opens an interactive model selection dialog (alias for `/review-gate-model`). |
+| `model <provider>/<id> [thinkingLevel]` | Set reviewer model directly via menu. |
+| `thinking` | Opens an interactive thinking level selection dialog. |
+| `thinking <thinkingLevel>` | Set thinking level directly on the already configured model. |
 | `max-cycles <number>` | Set `maxCorrectionCycles` to a positive integer. |
 | `toggle-git-diff` | Toggle `git.includeDiff` on or off. |
 | `toggle-session-context` | Toggle `context.includeSessionSlice` on or off. |
@@ -271,14 +272,24 @@ Each entry includes a timestamp, the attempt number, and the reviewer model used
 The reviewer model is separate from the main agent model. It is configured via:
 
 ```
+/review-gate-model                         # interactive selection dialog
 /review-gate-model <provider>/<id> [thinkingLevel]
 ```
+
+When called without arguments, an interactive dialog opens listing all available models from the registry. Select with ↑/↓ and Enter, or cancel with Escape.
 
 Examples:
 
 ```
 /review-gate-model openrouter/deepseek/deepseek-v3.2 high
 /review-gate-model test-provider/test-model
+```
+
+The thinking level can also be set interactively:
+
+```
+/review-gate thinking           # interactive selection dialog
+/review-gate thinking high       # direct selection
 ```
 
 Valid thinking levels:
@@ -322,8 +333,8 @@ A manual validation checklist covering `/reload`, command registration, config p
 4. Run tests: `pnpm test`.
 5. Load or reload the extension in Pi: `/reload`.
 6. Run `/review-gate-status` to inspect the current configuration.
-7. Run `/review-gate-model` to list available models (requires model registry).
-8. Configure a reviewer model: `/review-gate-model <provider>/<id>`.
+7. Run `/review-gate-model` to open the interactive model picker and select a model (requires model registry).
+8. Alternatively, configure a reviewer model directly: `/review-gate-model <provider>/<id>`.
 9. Enable the gate: `/review-gate-on`.
 10. Trigger a simple task expected to pass review.
 11. Trigger a task expected to fail in `block` mode.

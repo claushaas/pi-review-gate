@@ -452,7 +452,7 @@ describe("createModelClientFromContext", () => {
     );
   });
 
-  it("fails when reviewer model does not expose complete", async () => {
+  it("fails when reviewer model has no complete and real SDK invocation fails", async () => {
     const client = createModelClientFromContext({
       modelRegistry: {
         find: vi.fn(async () => ({
@@ -462,9 +462,11 @@ describe("createModelClientFromContext", () => {
       },
     });
 
-    await expect(client.complete(completionParams)).rejects.toThrow(
-      "Reviewer model does not expose a complete method: test-provider/test-model",
-    );
+    // When the resolved candidate lacks a `complete` method, the code falls
+    // through to `completeSimple` from @earendil-works/pi-ai. With a mock
+    // model object that has no real API provider, `completeSimple` throws
+    // its own error.
+    await expect(client.complete(completionParams)).rejects.toThrow();
   });
 
   it("fails when reviewer model returns a non-string response", async () => {

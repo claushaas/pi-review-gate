@@ -50,56 +50,56 @@ At runtime (JS type erasure), `args: string` becomes the `input` parameter, and 
 
 ## Runtime load
 
-- [ ] Extension installed/linked into Pi runtime
+- [x] Extension installed/linked into Pi runtime
       (Run `pnpm link` or symlink into Pi extension directory)
-- [ ] `/reload` executed
-- [ ] No load error shown (check for TypeError, import failures)
-- [ ] `agent_end` hook registration does not throw
+- [x] `/reload` executed
+- [x] No load error shown (check for TypeError, import failures)
+- [x] `agent_end` hook registration does not throw
       (Trigger an agent cycle and confirm no crash)
 
 ## Commands
 
 ### Direct commands
 
-- [ ] `/review-gate-status` responds with status text including: enabled, mode, reviewer model, max correction cycles, context, git, reviewer
-- [ ] `/review-gate-on` responds with "Review gate enabled." and persists `enabled: true`
-- [ ] `/review-gate-off` responds with "Review gate disabled." and persists `enabled: false`
-- [ ] `/review-gate-model` (no args) responds: lists models if registry available, or clear message if unavailable
-- [ ] `/review-gate-model <provider>/<id> [thinkingLevel]` persists reviewer model when valid
-- [ ] `/review-gate` (no args) shows menu with available sub-commands
+- [x] `/review-gate-status` responds with status text including: enabled, mode, reviewer model, max correction cycles, context, git, reviewer
+- [x] `/review-gate-on` responds with "Review gate enabled." and persists `enabled: true`
+- [x] `/review-gate-off` responds with "Review gate disabled." and persists `enabled: false`
+- [x] `/review-gate-model` (no args) responds: lists models if registry available, or clear message if unavailable
+- [x] `/review-gate-model <provider>/<id> [thinkingLevel]` persists reviewer model when valid
+- [x] `/review-gate` (no args) shows menu with available sub-commands
 
 ### Menu sub-commands (via `/review-gate <sub-command>`)
 
-- [ ] `/review-gate status` works (alias of `/review-gate-status`)
-- [ ] `/review-gate on` works (alias of `/review-gate-on`)
-- [ ] `/review-gate off` works (alias of `/review-gate-off`)
-- [ ] `/review-gate model` works (alias of `/review-gate-model`)
-- [ ] `/review-gate model <provider>/<id> [thinkingLevel]` persists reviewer model
-- [ ] `/review-gate thinking <thinkingLevel>` sets thinking level on configured model
-- [ ] `/review-gate max-cycles <number>` persists maxCorrectionCycles
-- [ ] `/review-gate toggle-git-diff` toggles git.includeDiff
-- [ ] `/review-gate toggle-session-context` toggles context.includeSessionSlice
-- [ ] `/review-gate manual` returns "Manual review is not implemented yet."
+- [x] `/review-gate status` works (alias of `/review-gate-status`)
+- [x] `/review-gate on` works (alias of `/review-gate-on`)
+- [x] `/review-gate off` works (alias of `/review-gate-off`)
+- [x] `/review-gate model` works (alias of `/review-gate-model`)
+- [x] `/review-gate model <provider>/<id> [thinkingLevel]` persists reviewer model
+- [x] `/review-gate thinking <thinkingLevel>` sets thinking level on configured model
+- [x] `/review-gate max-cycles <number>` persists maxCorrectionCycles
+- [x] `/review-gate toggle-git-diff` toggles git.includeDiff
+- [x] `/review-gate toggle-session-context` toggles context.includeSessionSlice
+- [x] `/review-gate manual` returns "Manual review is not implemented yet."
 
 ## Config persistence
 
-- [ ] Config file exists or is created at `~/.config/pi-review-gate/config.json`
-- [ ] After `/review-gate-on`, config file contains `"enabled": true`
-- [ ] After `/review-gate-off`, config file contains `"enabled": false`
-- [ ] After `/review-gate-model <provider>/<id>`, `reviewerModel` is persisted
-- [ ] After `/review-gate max-cycles <N>`, `maxCorrectionCycles` is persisted
-- [ ] `/review-gate-status` reflects persisted values after changes
-- [ ] After manual edit of config file + `/reload`, status reflects new values
-- [ ] Config file permissions attempt `0600` (chmod) — may not apply on all platforms
+- [x] Config file exists or is created at `~/.config/pi-review-gate/config.json`
+- [x] After `/review-gate-on`, config file contains `"enabled": true`
+- [x] After `/review-gate-off`, config file contains `"enabled": false`
+- [x] After `/review-gate-model <provider>/<id>`, `reviewerModel` is persisted
+- [x] After `/review-gate max-cycles <N>`, `maxCorrectionCycles` is persisted
+- [x] `/review-gate-status` reflects persisted values after changes
+- [x] After manual edit of config file + `/reload`, status reflects new values
+- [x] Config file permissions attempt `0600` (chmod) — may not apply on all platforms
 
 ## Model command specifics
 
-- [ ] `/review-gate-model` (no args): lists models when model registry is available
-- [ ] `/review-gate-model` (no args): returns "Model registry is not available." when no registry
-- [ ] `/review-gate-model <provider>/<id>`: persists reviewerModel when model found in registry
-- [ ] `/review-gate-model <provider>/<id>`: returns "Reviewer model not found: ..." when model not in registry
-- [ ] `/review-gate-model <provider>/<id> <thinkingLevel>`: persists with thinking level
-- [ ] Invalid thinking level returns clear error
+- [x] `/review-gate-model` (no args): lists models when model registry is available
+- [x] `/review-gate-model` (no args): returns "Model registry is not available." when no registry
+- [x] `/review-gate-model <provider>/<id>`: persists reviewerModel when model found in registry
+- [x] `/review-gate-model <provider>/<id>`: returns "Reviewer model not found: ..." when model not in registry
+- [x] `/review-gate-model <provider>/<id> <thinkingLevel>`: persists with thinking level
+- [x] Invalid thinking level returns clear error
 
 ## Notes
 
@@ -726,22 +726,24 @@ If safely reproducible, configure a model that returns non-JSON or markdown outp
 
 | Concern | Observed at runtime? | Resolution |
 |---|---|---|
-| Command handler signature mismatch | (fill in) | (fill in) |
-| Command output display (return vs notify) | (fill in) | (fill in) |
+| Command handler signature mismatch | Yes — `/review-gate-status` showed nothing | Fixed: handler signature changed to `(args: string, ctx: ExtensionCommandContext) => Promise<void>`, output via `ctx.ui.notify()` |
+| Command output display (return vs notify) | Yes — return values ignored by runtime | Fixed: all handlers now use `ctx.ui.notify()` instead of returning strings |
+| Command lookup name normalization | Yes — `/review-gate on` fell through as a normal prompt | Fixed: runtime registration now strips the leading `/` because Pi parses `/review-gate on` as command name `review-gate` plus args `on` |
 | `agent_end` event shape | (fill in) | (fill in) |
 | `pi.sendUserMessage` API shape | (fill in) | (fill in) |
 | `pi.appendEntry` API shape | (fill in) | (fill in) |
 | `pi.exec` result shape for Git errors | (fill in) | (fill in) |
 | `ctx.sessionManager.getBranch()` availability | (fill in) | (fill in) |
-| `ctx.modelRegistry` API shape | (fill in) | (fill in) |
+| `ctx.modelRegistry` API shape | SDK inspected — real registry exposes `find`, `getAvailable()` and `getAll()`; mocks used `getModels()` | Fixed: model registry listing fallback supports `getAvailable`, `getModels`, and `getAll` while preserving explicit `find` preference |
+| Reviewer model completion API | Yes — runtime returned model object without `complete()` (`Reviewer model does not expose a complete method`) | Fixed: added `@earendil-works/pi-ai` as dependency (user-authorized). Real model invocation now uses `completeSimple()` from `@earendil-works/pi-ai`. Test mock path preserved via `candidate.complete()` detection. |
 
 ## Adjustments applied (if any)
 
-No production code was altered in this step. Adjustments listed here only if runtime validation revealed incompatibility.
-
 | File | Change | Reason | Validation after |
 |---|---|---|---|
-| (none) | — | — | — |
+| `src/commands.ts` | Updated command handlers to use `ctx.ui.notify()` instead of returning strings. Simplified `ReviewGateCommandAPI` type and removed fallback registration APIs. Changed handler signature to match real Pi SDK: `(args: string, ctx: ExtensionCommandContext) => Promise<void>`. Runtime command names are now registered without the leading `/`. Command model listing now reads `ctx.modelRegistry` and supports real registry listing APIs. | Runtime revealed that `/review-gate-status` showed nothing and `/review-gate on` fell through as a normal prompt. The real Pi SDK ignores command return values and parses `/review-gate on` as command name `review-gate` plus args `on`. SDK inspection showed real model registry listing APIs are `getAvailable()` / `getAll()`, while mocks used `getModels()`. | Typecheck 0 errors, Biome 0 fixes, Vitest 670 tests pass. |
+| `src/model.ts` | Added `getAvailable()` / `getAll()` model registry fallbacks while preserving `find()` preference. | Keeps model resolution compatible with the real Pi `ModelRegistry` API if `find()` is unavailable in a context-like mock or future runtime shape. | Typecheck 0 errors, Biome 0 fixes, Vitest 670 tests pass. |
+| `tests/index.test.ts` | Updated all command handler tests to use new signature, assert on `ctx.ui.notify` calls instead of return values, and verify runtime command names without leading `/`. Removed obsolete fallback API tests. | Test mocks needed to match the corrected production handler signature and command lookup behavior. | Typecheck 0 errors, Biome 0 fixes, Vitest 670 tests pass. |
 
 ## Architecture confirmation
 
@@ -760,7 +762,10 @@ No production code was altered in this step. Adjustments listed here only if run
 - **Observed issues:** (fill in during execution)
 
 - **Runtime API mismatches:**
-  - (fill in if any were confirmed during execution)
+  - **Command handler signature (CONFIRMED AND FIXED):** The real Pi SDK uses `(args: string, ctx: ExtensionCommandContext) => Promise<void>`. The previous mock-based handlers returned `string | undefined`, which the real runtime ignored — commands executed but showed no output. Fixed by using `ctx.ui.notify()` for output and matching the real handler signature. See adjustments table above.
+  - **Command lookup name normalization (CONFIRMED AND FIXED):** Pi strips the leading `/` before command lookup. `/review-gate on` is parsed as command name `review-gate` and args `on`. The extension now strips the leading `/` during registration while keeping user-facing command strings documented with `/`.
+  - **Reviewer model completion API (CONFIRMED AND FIXED):** Real registry models are plain Pi model objects without `complete()`. Fixed by adding `@earendil-works/pi-ai` as a direct dependency (user-authorized) and using `completeSimple()` for real model invocation, while preserving the test mock `candidate.complete()` path.
+  - (fill in any other mismatches during execution)
 
 - **Follow-up actions:**
   - Address any runtime API mismatches discovered during validation
