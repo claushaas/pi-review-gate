@@ -20,6 +20,211 @@ import { getWarningMessage, handleAgentEnd, runReviewer } from "../src/reviewer.
 import { createRuntimeState } from "../src/state.js";
 import type { ReviewGateConfig, ReviewGateResult, RuntimeState } from "../src/types.js";
 
+// ============================================================================
+// Shared Test Fixture Helpers
+// Consolidated mock helpers used across describe blocks.
+// ============================================================================
+
+function createFreshState(): RuntimeState {
+  return createRuntimeState();
+}
+
+function createPiMock(overrides: Partial<ReviewGateAgentEndAPI> = {}) {
+  return {
+    appendEntry: vi.fn(),
+    exec: vi.fn(async () => ({ stdout: "" })),
+    sendUserMessage: vi.fn(),
+    ...overrides,
+  };
+}
+
+function createGitExecMock() {
+  return vi.fn(async (command: string, args: string[]) => {
+    const joinedArgs = args.join(" ");
+    if (command !== "git") {
+      throw new Error(`Unexpected command: ${command}`);
+    }
+    if (joinedArgs === "status --short") {
+      return { stdout: " M src/reviewer.ts\n" };
+    }
+    if (joinedArgs === "diff --stat") {
+      return { stdout: " src/reviewer.ts | 10 ++++++++++\n" };
+    }
+    if (joinedArgs === "diff") {
+      return { stdout: "diff --git a/src/reviewer.ts b/src/reviewer.ts\n" };
+    }
+    throw new Error(`Unexpected git args: ${joinedArgs}`);
+  });
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: shared infrastructure helper for Step 18.1
+function createNonGitExecMock() {
+  return vi.fn(async () => {
+    throw {
+      stderr: "fatal: not a git repository (or any of the parent directories): .git",
+    };
+  });
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: shared infrastructure helper for Step 18.1
+function createUnexpectedGitErrorExecMock(message = "permission denied") {
+  return vi.fn(async () => {
+    throw { stderr: message };
+  });
+}
+
+function createApprovedModelRegistry() {
+  const complete = vi.fn(async () =>
+    JSON.stringify({
+      approved: true,
+      severity: "pass",
+      summary: "Delivery satisfies the request.",
+      requiredCorrections: [],
+      recommendedCorrections: [],
+      evidence: ["Reviewer approved the delivery."],
+      confidence: "high",
+    }),
+  );
+  return {
+    complete,
+    modelRegistry: {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete,
+      })),
+      getModels: vi.fn(async () => [
+        {
+          provider: "test-provider",
+          id: "test-model",
+          name: "Test Model",
+        },
+      ]),
+    },
+  };
+}
+
+function createRejectedModelRegistry(resultOverrides: Partial<ReviewGateResult> = {}) {
+  const result: ReviewGateResult = {
+    approved: false,
+    severity: "blocking",
+    summary: "Required implementation is missing.",
+    requiredCorrections: ["Fix the missing behavior."],
+    recommendedCorrections: [],
+    evidence: ["The diff does not include the required change."],
+    confidence: "high",
+    ...resultOverrides,
+  };
+  const complete = vi.fn(async () => JSON.stringify(result));
+  return {
+    complete,
+    modelRegistry: {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete,
+      })),
+      getModels: vi.fn(async () => [
+        {
+          provider: "test-provider",
+          id: "test-model",
+          name: "Test Model",
+        },
+      ]),
+    },
+  };
+}
+
+function createInvalidJsonModelRegistry(jsonText = "{ invalid json }") {
+  const complete = vi.fn(async () => jsonText);
+  return {
+    complete,
+    modelRegistry: {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete,
+      })),
+      getModels: vi.fn(async () => [
+        {
+          provider: "test-provider",
+          id: "test-model",
+          name: "Test Model",
+        },
+      ]),
+    },
+  };
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: shared infrastructure helper for Step 18.1
+function createFailingModelRegistry(message = "model failed") {
+  const complete = vi.fn(async () => {
+    throw new Error(message);
+  });
+  return {
+    complete,
+    modelRegistry: {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete,
+      })),
+      getModels: vi.fn(async () => [
+        {
+          provider: "test-provider",
+          id: "test-model",
+          name: "Test Model",
+        },
+      ]),
+    },
+  };
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: shared infrastructure helper for Step 18.1
+function createSessionManagerMock(branch: unknown[] = []) {
+  return {
+    getBranch: vi.fn(async () => branch),
+  };
+}
+
+// biome-ignore lint/correctness/noUnusedVariables: shared infrastructure helper for Step 18.1
+function createUiMock() {
+  return {
+    notify: vi.fn(),
+  };
+}
+
+function getRegisteredCommandHandlers(
+  registerCommand: ReturnType<typeof vi.fn>,
+): Map<string, (input?: unknown) => unknown> {
+  return new Map(registerCommand.mock.calls.map(([name, options]) => [name, options.handler]));
+}
+
+async function runCommandHandler(
+  handler: ((input?: unknown) => unknown) | undefined,
+  input?: unknown,
+): Promise<unknown> {
+  if (!handler) {
+    throw new Error("Missing command handler.");
+  }
+  return await Promise.resolve(handler(input));
+}
+
+function createConfigWithReviewerModel(
+  overrides: Partial<ReviewGateConfig> = {},
+): ReviewGateConfig {
+  return {
+    ...defaultConfig,
+    enabled: true,
+    reviewerModel: {
+      provider: "test-provider",
+      id: "test-model",
+      thinkingLevel: "high" as const,
+    },
+    ...overrides,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Entrypoint smoke test (preserved)
 // ---------------------------------------------------------------------------
@@ -37,18 +242,6 @@ describe("pi-review-gate entrypoint", () => {
 describe("handleAgentEnd early returns", () => {
   // -- fixture helpers --
 
-  function createFreshState(): RuntimeState {
-    return createRuntimeState();
-  }
-
-  function createTestPi() {
-    return {
-      appendEntry: vi.fn() as ReviewGateAgentEndAPI["appendEntry"],
-      sendUserMessage: vi.fn(),
-      exec: vi.fn(),
-    };
-  }
-
   const defaultEvent = {
     messages: [
       { role: "user", content: "Implement step 15.1." },
@@ -60,7 +253,7 @@ describe("handleAgentEnd early returns", () => {
 
   it("returns early when review gate is disabled", async () => {
     const state = createFreshState();
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -79,7 +272,7 @@ describe("handleAgentEnd early returns", () => {
     const state = createFreshState();
     state.correctionCycle = 5;
     state.lastOriginalUserPromptHash = "existing-hash";
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -98,7 +291,7 @@ describe("handleAgentEnd early returns", () => {
   it("returns early when a review is already active", async () => {
     const state = createFreshState();
     state.activeReview = true;
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -122,7 +315,7 @@ describe("handleAgentEnd early returns", () => {
     state.activeReview = true;
     state.correctionCycle = 3;
     state.lastOriginalUserPromptHash = "some-hash";
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -144,7 +337,7 @@ describe("handleAgentEnd early returns", () => {
 
   it("handles event.messages undefined defensively", async () => {
     const state = createFreshState();
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -163,7 +356,7 @@ describe("handleAgentEnd early returns", () => {
 
   it("handles event.messages null defensively", async () => {
     const state = createFreshState();
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -182,7 +375,7 @@ describe("handleAgentEnd early returns", () => {
 
   it("handles event.messages not an array defensively", async () => {
     const state = createFreshState();
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -201,7 +394,7 @@ describe("handleAgentEnd early returns", () => {
 
   it("handles event.messages as empty array", async () => {
     const state = createFreshState();
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -223,7 +416,7 @@ describe("handleAgentEnd early returns", () => {
   it("resets correction cycle for a real user prompt", async () => {
     const state = createFreshState();
     state.correctionCycle = 2;
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -243,7 +436,7 @@ describe("handleAgentEnd early returns", () => {
 
   it("preserves hash for identical real prompts across calls", async () => {
     const state1 = createFreshState();
-    const pi1 = createTestPi();
+    const pi1 = createPiMock();
 
     await handleAgentEnd({
       pi: pi1,
@@ -259,7 +452,7 @@ describe("handleAgentEnd early returns", () => {
     const hash1 = state1.lastOriginalUserPromptHash;
 
     const state2 = createFreshState();
-    const pi2 = createTestPi();
+    const pi2 = createPiMock();
 
     await handleAgentEnd({
       pi: pi2,
@@ -281,7 +474,7 @@ describe("handleAgentEnd early returns", () => {
     const state = createFreshState();
     state.correctionCycle = 1;
     state.lastOriginalUserPromptHash = "some-hash";
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -309,7 +502,7 @@ describe("handleAgentEnd early returns", () => {
 
   it("persists skip when reviewer model is not configured", async () => {
     const state = createFreshState();
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -338,7 +531,7 @@ describe("handleAgentEnd early returns", () => {
 
   it("includes a valid ISO timestamp in skip payload", async () => {
     const state = createFreshState();
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -361,7 +554,7 @@ describe("handleAgentEnd early returns", () => {
 
   it("does not call sendUserMessage during skip", async () => {
     const state = createFreshState();
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -379,7 +572,7 @@ describe("handleAgentEnd early returns", () => {
 
   it("does not call exec during skip", async () => {
     const state = createFreshState();
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -451,7 +644,7 @@ describe("handleAgentEnd early returns", () => {
 
   it("calls loadConfig exactly once", async () => {
     const state = createFreshState();
-    const pi = createTestPi();
+    const pi = createPiMock();
     const loadConfig = vi.fn(async () => ({
       ...defaultConfig,
       enabled: false,
@@ -471,7 +664,7 @@ describe("handleAgentEnd early returns", () => {
 
   it("calls beginReview when config is enabled and no active review", async () => {
     const state = createFreshState();
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -490,7 +683,7 @@ describe("handleAgentEnd early returns", () => {
   it("does not call beginReview when already active", async () => {
     const state = createFreshState();
     state.activeReview = true;
-    const pi = createTestPi();
+    const pi = createPiMock();
 
     await handleAgentEnd({
       pi,
@@ -515,85 +708,6 @@ describe("handleAgentEnd early returns", () => {
 describe("handleAgentEnd approved review orchestration", () => {
   // -- fixture helpers --
 
-  function createFreshState(): RuntimeState {
-    return createRuntimeState();
-  }
-
-  const configWithReviewerModel: ReviewGateConfig = {
-    ...defaultConfig,
-    enabled: true,
-    reviewerModel: {
-      provider: "test-provider",
-      id: "test-model",
-      thinkingLevel: "high",
-    },
-  };
-
-  function createGitPi() {
-    return {
-      appendEntry: vi.fn(),
-      sendUserMessage: vi.fn(),
-      exec: vi.fn(async (command: string, args: string[]) => {
-        const joinedArgs = args.join(" ");
-        if (command !== "git") {
-          throw new Error(`Unexpected command: ${command}`);
-        }
-        if (joinedArgs === "status --short") {
-          return { stdout: " M src/reviewer.ts\n" };
-        }
-        if (joinedArgs === "diff --stat") {
-          return { stdout: " src/reviewer.ts | 10 ++++++++++\n" };
-        }
-        if (joinedArgs === "diff") {
-          return {
-            stdout: "diff --git a/src/reviewer.ts b/src/reviewer.ts\n",
-          };
-        }
-        throw new Error(`Unexpected git args: ${joinedArgs}`);
-      }),
-    };
-  }
-
-  function createApprovingModelRegistry() {
-    return {
-      find: vi.fn(async (_provider?: string, _id?: string) => ({
-        provider: "test-provider",
-        id: "test-model",
-        complete: vi.fn(async () =>
-          JSON.stringify({
-            approved: true,
-            severity: "pass",
-            summary: "Delivery satisfies the request.",
-            requiredCorrections: [],
-            recommendedCorrections: [],
-            evidence: ["Reviewer approved the delivery."],
-            confidence: "high",
-          }),
-        ),
-      })),
-    };
-  }
-
-  function createRejectingModelRegistry() {
-    return {
-      find: vi.fn(async (_provider?: string, _id?: string) => ({
-        provider: "test-provider",
-        id: "test-model",
-        complete: vi.fn(async () =>
-          JSON.stringify({
-            approved: false,
-            severity: "blocking",
-            summary: "Required implementation is missing.",
-            requiredCorrections: ["Fix the missing behavior."],
-            recommendedCorrections: [],
-            evidence: ["The diff does not include the required change."],
-            confidence: "high",
-          }),
-        ),
-      })),
-    };
-  }
-
   const defaultEvent = {
     messages: [
       { role: "user", content: "Implement step 15.2." },
@@ -605,7 +719,7 @@ describe("handleAgentEnd approved review orchestration", () => {
 
   it("collects git, runs reviewer, persists approved result, and sends no follow-up", async () => {
     const state = createFreshState();
-    const pi = createGitPi();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const complete = vi.fn(async () =>
       JSON.stringify({
         approved: true,
@@ -629,7 +743,7 @@ describe("handleAgentEnd approved review orchestration", () => {
       pi,
       state,
       event: defaultEvent,
-      loadConfig: async () => configWithReviewerModel,
+      loadConfig: async () => createConfigWithReviewerModel(),
       context: { modelRegistry },
     });
 
@@ -683,7 +797,7 @@ describe("handleAgentEnd approved review orchestration", () => {
         message: { role: "user", content: "Original branch prompt" },
       },
     ]);
-    const modelRegistry = createApprovingModelRegistry();
+    const { modelRegistry } = createApprovedModelRegistry();
 
     await handleAgentEnd({
       pi,
@@ -691,7 +805,7 @@ describe("handleAgentEnd approved review orchestration", () => {
       event: {
         messages: [{ role: "user", content: "Current prompt" }],
       },
-      loadConfig: async () => configWithReviewerModel,
+      loadConfig: async () => createConfigWithReviewerModel(),
       context: {
         sessionManager: { getBranch },
         modelRegistry,
@@ -710,14 +824,14 @@ describe("handleAgentEnd approved review orchestration", () => {
 
   it("does not throw when sessionManager is absent", async () => {
     const state = createFreshState();
-    const pi = createGitPi();
-    const modelRegistry = createApprovingModelRegistry();
+    const pi = createPiMock({ exec: createGitExecMock() });
+    const { modelRegistry } = createApprovedModelRegistry();
 
     await handleAgentEnd({
       pi,
       state,
       event: defaultEvent,
-      loadConfig: async () => configWithReviewerModel,
+      loadConfig: async () => createConfigWithReviewerModel(),
       context: { modelRegistry },
     });
 
@@ -731,15 +845,15 @@ describe("handleAgentEnd approved review orchestration", () => {
 
   it("treats non-array getBranch result as absent", async () => {
     const state = createFreshState();
-    const pi = createGitPi();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const getBranch = vi.fn(async () => "not-an-array") as unknown as () => unknown[];
-    const modelRegistry = createApprovingModelRegistry();
+    const { modelRegistry } = createApprovedModelRegistry();
 
     await handleAgentEnd({
       pi,
       state,
       event: defaultEvent,
-      loadConfig: async () => configWithReviewerModel,
+      loadConfig: async () => createConfigWithReviewerModel(),
       context: {
         sessionManager: { getBranch },
         modelRegistry,
@@ -764,7 +878,7 @@ describe("handleAgentEnd approved review orchestration", () => {
       sendUserMessage: vi.fn(),
       exec: vi.fn(async () => ({ stdout: "" })),
     };
-    const modelRegistry = createRejectingModelRegistry();
+    const { modelRegistry } = createRejectedModelRegistry();
 
     await handleAgentEnd({
       pi,
@@ -916,7 +1030,7 @@ describe("handleAgentEnd approved review orchestration", () => {
       sendUserMessage: vi.fn(),
       exec: vi.fn(async () => ({ stdout: "" })),
     };
-    const modelRegistry = createApprovingModelRegistry();
+    const { modelRegistry } = createApprovedModelRegistry();
 
     await expect(
       handleAgentEnd({
@@ -942,15 +1056,15 @@ describe("handleAgentEnd approved review orchestration", () => {
 
   it("releases activeReview when sessionManager.getBranch throws", async () => {
     const state = createFreshState();
-    const pi = createGitPi();
-    const modelRegistry = createApprovingModelRegistry();
+    const pi = createPiMock({ exec: createGitExecMock() });
+    const { modelRegistry } = createApprovedModelRegistry();
 
     await expect(
       handleAgentEnd({
         pi,
         state,
         event: defaultEvent,
-        loadConfig: async () => configWithReviewerModel,
+        loadConfig: async () => createConfigWithReviewerModel(),
         context: {
           sessionManager: {
             getBranch: vi.fn(async () => {
@@ -973,13 +1087,13 @@ describe("handleAgentEnd approved review orchestration", () => {
       appendEntry: vi.fn(),
       exec: vi.fn(async () => ({ stdout: "" })),
     };
-    const modelRegistry = createApprovingModelRegistry();
+    const { modelRegistry } = createApprovedModelRegistry();
 
     await handleAgentEnd({
       pi,
       state,
       event: defaultEvent,
-      loadConfig: async () => configWithReviewerModel,
+      loadConfig: async () => createConfigWithReviewerModel(),
       context: { modelRegistry },
     });
 
@@ -994,14 +1108,14 @@ describe("handleAgentEnd approved review orchestration", () => {
 
   it("does not call sendUserMessage for approved review", async () => {
     const state = createFreshState();
-    const pi = createGitPi();
-    const modelRegistry = createApprovingModelRegistry();
+    const pi = createPiMock({ exec: createGitExecMock() });
+    const { modelRegistry } = createApprovedModelRegistry();
 
     await handleAgentEnd({
       pi,
       state,
       event: defaultEvent,
-      loadConfig: async () => configWithReviewerModel,
+      loadConfig: async () => createConfigWithReviewerModel(),
       context: { modelRegistry },
     });
 
@@ -1015,7 +1129,7 @@ describe("handleAgentEnd approved review orchestration", () => {
       sendUserMessage: vi.fn(),
       exec: vi.fn(async () => ({ stdout: "" })),
     };
-    const modelRegistry = createRejectingModelRegistry();
+    const { modelRegistry } = createRejectedModelRegistry();
 
     await handleAgentEnd({
       pi,
@@ -1044,19 +1158,6 @@ describe("handleAgentEnd approved review orchestration", () => {
 // ---------------------------------------------------------------------------
 
 describe("handleAgentEnd with unavailable git context", () => {
-  function createFreshState(): RuntimeState {
-    return createRuntimeState();
-  }
-
-  const configWithReviewerModel: ReviewGateConfig = {
-    ...defaultConfig,
-    enabled: true,
-    reviewerModel: {
-      provider: "test-provider",
-      id: "test-model",
-    },
-  };
-
   it("continues review and persists approved result in a non-git directory", async () => {
     const state = createFreshState();
     const pi = {
@@ -1096,7 +1197,7 @@ describe("handleAgentEnd with unavailable git context", () => {
           { role: "assistant", content: "Done." },
         ],
       },
-      loadConfig: async () => configWithReviewerModel,
+      loadConfig: async () => createConfigWithReviewerModel(),
       context: { modelRegistry },
     });
 
@@ -1153,7 +1254,7 @@ describe("handleAgentEnd with unavailable git context", () => {
       event: {
         messages: [{ role: "user", content: "Prompt" }],
       },
-      loadConfig: async () => configWithReviewerModel,
+      loadConfig: async () => createConfigWithReviewerModel(),
       context: { modelRegistry },
     });
 
@@ -1171,10 +1272,6 @@ describe("handleAgentEnd with unavailable git context", () => {
 // ---------------------------------------------------------------------------
 
 describe("handleAgentEnd model failure handling", () => {
-  function createFreshState(): RuntimeState {
-    return createRuntimeState();
-  }
-
   const configWithReviewerModel: ReviewGateConfig = {
     ...defaultConfig,
     enabled: true,
@@ -1599,10 +1696,6 @@ describe("handleAgentEnd model failure handling", () => {
 // ---------------------------------------------------------------------------
 
 describe("handleAgentEnd block rejection with follow-up", () => {
-  function createFreshState(): RuntimeState {
-    return createRuntimeState();
-  }
-
   const rejectedReviewResult = {
     approved: false,
     severity: "blocking",
@@ -1612,31 +1705,6 @@ describe("handleAgentEnd block rejection with follow-up", () => {
     evidence: ["The diff does not include the required implementation."],
     confidence: "high",
   } as const;
-
-  function createGitPiMock() {
-    return {
-      appendEntry: vi.fn(),
-      sendUserMessage: vi.fn(),
-      exec: vi.fn(async (command: string, args: string[]) => {
-        const joinedArgs = args.join(" ");
-        if (command !== "git") {
-          throw new Error(`Unexpected command: ${command}`);
-        }
-        if (joinedArgs === "status --short") {
-          return { stdout: " M src/reviewer.ts\n" };
-        }
-        if (joinedArgs === "diff --stat") {
-          return { stdout: " src/reviewer.ts | 10 ++++++++++\n" };
-        }
-        if (joinedArgs === "diff") {
-          return {
-            stdout: "diff --git a/src/reviewer.ts b/src/reviewer.ts\n",
-          };
-        }
-        throw new Error(`Unexpected git args: ${joinedArgs}`);
-      }),
-    };
-  }
 
   function createRejectedModelRegistry() {
     const complete = vi.fn(async () => JSON.stringify(rejectedReviewResult));
@@ -1668,7 +1736,7 @@ describe("handleAgentEnd block rejection with follow-up", () => {
 
   it("persists rejected result and sends mandatory follow-up in block mode", async () => {
     const state = createFreshState();
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const { modelRegistry } = createRejectedModelRegistry();
 
     await handleAgentEnd({
@@ -1695,7 +1763,7 @@ describe("handleAgentEnd block rejection with follow-up", () => {
     );
 
     expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
-    const [message, options] = pi.sendUserMessage.mock.calls[0];
+    const [message, options] = vi.mocked(pi.sendUserMessage).mock.calls[0];
     expect(message.startsWith(CORRECTION_REQUEST_MARKER)).toBe(true);
     expect(message).toContain("# Mandatory Review Corrections");
     expect(message).toContain("Implement the missing behavior.");
@@ -1707,7 +1775,7 @@ describe("handleAgentEnd block rejection with follow-up", () => {
   it("does not increment correctionCycle manually after sending follow-up", async () => {
     const state = createFreshState();
     state.correctionCycle = 0;
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const { modelRegistry } = createRejectedModelRegistry();
 
     await handleAgentEnd({
@@ -1760,7 +1828,7 @@ describe("handleAgentEnd block rejection with follow-up", () => {
   it("does not send follow-up when correction cycle limit is already reached", async () => {
     const state = createFreshState();
     state.correctionCycle = 1;
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const { modelRegistry } = createRejectedModelRegistry();
 
     await handleAgentEnd({
@@ -1798,7 +1866,7 @@ describe("handleAgentEnd block rejection with follow-up", () => {
 
   it("does not send follow-up for rejected result in warn mode in this step", async () => {
     const state = createFreshState();
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const { modelRegistry } = createRejectedModelRegistry();
 
     await handleAgentEnd({
@@ -1838,10 +1906,6 @@ describe("handleAgentEnd block rejection with follow-up", () => {
 // ---------------------------------------------------------------------------
 
 describe("handleAgentEnd warn rejection orchestration", () => {
-  function createFreshState(): RuntimeState {
-    return createRuntimeState();
-  }
-
   const rejectedReviewResult: ReviewGateResult = {
     approved: false,
     severity: "major",
@@ -1851,31 +1915,6 @@ describe("handleAgentEnd warn rejection orchestration", () => {
     evidence: ["The diff does not include the required implementation."],
     confidence: "high",
   };
-
-  function createGitPiMock() {
-    return {
-      appendEntry: vi.fn(),
-      sendUserMessage: vi.fn(),
-      exec: vi.fn(async (command: string, args: string[]) => {
-        const joinedArgs = args.join(" ");
-        if (command !== "git") {
-          throw new Error(`Unexpected command: ${command}`);
-        }
-        if (joinedArgs === "status --short") {
-          return { stdout: " M src/reviewer.ts\n" };
-        }
-        if (joinedArgs === "diff --stat") {
-          return { stdout: " src/reviewer.ts | 10 ++++++++++\n" };
-        }
-        if (joinedArgs === "diff") {
-          return {
-            stdout: "diff --git a/src/reviewer.ts b/src/reviewer.ts\n",
-          };
-        }
-        throw new Error(`Unexpected git args: ${joinedArgs}`);
-      }),
-    };
-  }
 
   function createRejectedModelRegistry(result: ReviewGateResult = rejectedReviewResult) {
     const complete = vi.fn(async () => JSON.stringify(result));
@@ -1895,7 +1934,7 @@ describe("handleAgentEnd warn rejection orchestration", () => {
 
   it("persists rejected result without sending follow-up in warn mode", async () => {
     const state = createFreshState();
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const { modelRegistry } = createRejectedModelRegistry();
 
     await handleAgentEnd({
@@ -1945,7 +1984,7 @@ describe("handleAgentEnd warn rejection orchestration", () => {
 
   it("notifies warning when ui notify is available and notifyOnFail is enabled", async () => {
     const state = createFreshState();
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const ui = {
       notify: vi.fn(),
     };
@@ -1990,7 +2029,7 @@ describe("handleAgentEnd warn rejection orchestration", () => {
 
   it("does not fail when ui notify is unavailable in warn mode", async () => {
     const state = createFreshState();
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const { modelRegistry } = createRejectedModelRegistry();
 
     await expect(
@@ -2054,7 +2093,7 @@ describe("handleAgentEnd warn rejection orchestration", () => {
   it("does not create final failure in warn mode even when correction cycle limit is reached", async () => {
     const state = createFreshState();
     state.correctionCycle = 2;
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const { modelRegistry } = createRejectedModelRegistry();
 
     await handleAgentEnd({
@@ -2095,7 +2134,7 @@ describe("handleAgentEnd warn rejection orchestration", () => {
 
   it("preserves block mode follow-up behavior", async () => {
     const state = createFreshState();
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const { modelRegistry } = createRejectedModelRegistry();
 
     await handleAgentEnd({
@@ -2120,7 +2159,7 @@ describe("handleAgentEnd warn rejection orchestration", () => {
     });
 
     expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
-    const [message, options] = pi.sendUserMessage.mock.calls[0];
+    const [message, options] = vi.mocked(pi.sendUserMessage).mock.calls[0];
     expect(message.startsWith(CORRECTION_REQUEST_MARKER)).toBe(true);
     expect(options).toEqual({ deliverAs: "followUp" });
   });
@@ -2131,10 +2170,6 @@ describe("handleAgentEnd warn rejection orchestration", () => {
 // ---------------------------------------------------------------------------
 
 describe("handleAgentEnd maximum correction cycles", () => {
-  function createFreshState(): RuntimeState {
-    return createRuntimeState();
-  }
-
   const rejectedReviewResult = {
     approved: false,
     severity: "blocking",
@@ -2144,31 +2179,6 @@ describe("handleAgentEnd maximum correction cycles", () => {
     evidence: ["The diff still does not include the required implementation."],
     confidence: "high",
   } as const;
-
-  function createGitPiMock() {
-    return {
-      appendEntry: vi.fn(),
-      sendUserMessage: vi.fn(),
-      exec: vi.fn(async (command: string, args: string[]) => {
-        const joinedArgs = args.join(" ");
-        if (command !== "git") {
-          throw new Error(`Unexpected command: ${command}`);
-        }
-        if (joinedArgs === "status --short") {
-          return { stdout: " M src/reviewer.ts\n" };
-        }
-        if (joinedArgs === "diff --stat") {
-          return { stdout: " src/reviewer.ts | 10 ++++++++++\n" };
-        }
-        if (joinedArgs === "diff") {
-          return {
-            stdout: "diff --git a/src/reviewer.ts b/src/reviewer.ts\n",
-          };
-        }
-        throw new Error(`Unexpected git args: ${joinedArgs}`);
-      }),
-    };
-  }
 
   function createRejectedModelRegistry() {
     const complete = vi.fn(async () => JSON.stringify(rejectedReviewResult));
@@ -2205,7 +2215,7 @@ describe("handleAgentEnd maximum correction cycles", () => {
   it("persists final failure and sends no follow-up when block cycle limit is reached", async () => {
     const state = createFreshState();
     state.correctionCycle = 1;
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const { modelRegistry } = createRejectedModelRegistry();
 
     await handleAgentEnd({
@@ -2268,7 +2278,7 @@ describe("handleAgentEnd maximum correction cycles", () => {
   it("preserves block follow-up behavior when cycles are still available", async () => {
     const state = createFreshState();
     state.correctionCycle = 1;
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const { modelRegistry } = createRejectedModelRegistry();
 
     await handleAgentEnd({
@@ -2292,7 +2302,7 @@ describe("handleAgentEnd maximum correction cycles", () => {
 
     // Follow-up is sent
     expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
-    const [message, options] = pi.sendUserMessage.mock.calls[0];
+    const [message, options] = vi.mocked(pi.sendUserMessage).mock.calls[0];
     expect(message.startsWith(CORRECTION_REQUEST_MARKER)).toBe(true);
     expect(options).toEqual({ deliverAs: "followUp" });
 
@@ -2307,7 +2317,7 @@ describe("handleAgentEnd maximum correction cycles", () => {
   it("does not create final failure in warn mode even when cycle limit is reached", async () => {
     const state = createFreshState();
     state.correctionCycle = 2;
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const { modelRegistry } = createRejectedModelRegistry();
 
     await handleAgentEnd({
@@ -2359,7 +2369,7 @@ describe("handleAgentEnd maximum correction cycles", () => {
   it("optionally notifies final failure when ui notify is available and enabled", async () => {
     const state = createFreshState();
     state.correctionCycle = 1;
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const ui = {
       notify: vi.fn(),
     };
@@ -2401,7 +2411,7 @@ describe("handleAgentEnd maximum correction cycles", () => {
   it("does not fail when ui notify is unavailable for final failure", async () => {
     const state = createFreshState();
     state.correctionCycle = 1;
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const { modelRegistry } = createRejectedModelRegistry();
 
     await expect(
@@ -2438,7 +2448,7 @@ describe("handleAgentEnd maximum correction cycles", () => {
     const state = createFreshState();
     state.correctionCycle = 1;
     const pi = {
-      ...createGitPiMock(),
+      ...createPiMock({ exec: createGitExecMock() }),
       appendEntry: vi
         .fn()
         .mockResolvedValueOnce(undefined) // result persistence succeeds
@@ -2486,7 +2496,7 @@ describe("handleAgentEnd maximum correction cycles", () => {
   it("releases activeReview when notification throws during final failure", async () => {
     const state = createFreshState();
     state.correctionCycle = 1;
-    const pi = createGitPiMock();
+    const pi = createPiMock({ exec: createGitExecMock() });
     const ui = {
       notify: vi.fn(async () => {
         throw new Error("notification failed");
@@ -2530,51 +2540,14 @@ describe("handleAgentEnd maximum correction cycles", () => {
 // ---------------------------------------------------------------------------
 
 describe("handleAgentEnd invalid reviewer JSON", () => {
-  function createFreshState(): RuntimeState {
-    return createRuntimeState();
-  }
-
-  function createSimplePi() {
-    return {
-      appendEntry: vi.fn(),
-      sendUserMessage: vi.fn(),
-      exec: vi.fn(async () => ({ stdout: "" })),
-    };
-  }
-
-  function createInvalidJsonModelRegistry() {
-    return {
-      find: vi.fn(async () => ({
-        provider: "test-provider",
-        id: "test-model",
-        complete: vi.fn(async () => "{ invalid json }"),
-      })),
-    };
-  }
-
-  function createSchemaInvalidModelRegistry() {
-    return {
-      find: vi.fn(async () => ({
-        provider: "test-provider",
-        id: "test-model",
-        complete: vi.fn(async () =>
-          JSON.stringify({
-            approved: true,
-            severity: "critical",
-          }),
-        ),
-      })),
-    };
-  }
-
   // =================================================================
   // Fail-closed + block: treated as blocking result with follow-up
   // =================================================================
 
   it("treats invalid JSON as blocking result in fail-closed block mode", async () => {
     const state = createFreshState();
-    const pi = createSimplePi();
-    const modelRegistry = createInvalidJsonModelRegistry();
+    const pi = createPiMock();
+    const { modelRegistry } = createInvalidJsonModelRegistry();
 
     await handleAgentEnd({
       pi,
@@ -2615,7 +2588,7 @@ describe("handleAgentEnd invalid reviewer JSON", () => {
 
     // Follow-up is sent with correction request
     expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
-    const [message, options] = pi.sendUserMessage.mock.calls[0];
+    const [message, options] = vi.mocked(pi.sendUserMessage).mock.calls[0];
     expect(message.startsWith(CORRECTION_REQUEST_MARKER)).toBe(true);
     expect(message).toContain("Reviewer returned an invalid response.");
     expect(message).toContain(
@@ -2629,8 +2602,10 @@ describe("handleAgentEnd invalid reviewer JSON", () => {
 
   it("treats schema-invalid JSON as blocking result in fail-closed block mode", async () => {
     const state = createFreshState();
-    const pi = createSimplePi();
-    const modelRegistry = createSchemaInvalidModelRegistry();
+    const pi = createPiMock();
+    const { modelRegistry } = createInvalidJsonModelRegistry(
+      JSON.stringify({ approved: true, severity: "critical" }),
+    );
 
     await handleAgentEnd({
       pi,
@@ -2671,7 +2646,7 @@ describe("handleAgentEnd invalid reviewer JSON", () => {
 
     // Follow-up is sent
     expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
-    const [message] = pi.sendUserMessage.mock.calls[0];
+    const [message] = vi.mocked(pi.sendUserMessage).mock.calls[0];
     expect(message.startsWith(CORRECTION_REQUEST_MARKER)).toBe(true);
     expect(message).toContain("Reviewer returned an invalid response.");
 
@@ -2684,8 +2659,8 @@ describe("handleAgentEnd invalid reviewer JSON", () => {
 
   it("persists invalid JSON result without follow-up in fail-closed warn mode", async () => {
     const state = createFreshState();
-    const pi = createSimplePi();
-    const modelRegistry = createInvalidJsonModelRegistry();
+    const pi = createPiMock();
+    const { modelRegistry } = createInvalidJsonModelRegistry();
     const ui = {
       notify: vi.fn(),
     };
@@ -2744,8 +2719,8 @@ describe("handleAgentEnd invalid reviewer JSON", () => {
 
   it("does not notify warn when notifyOnFail is disabled", async () => {
     const state = createFreshState();
-    const pi = createSimplePi();
-    const modelRegistry = createInvalidJsonModelRegistry();
+    const pi = createPiMock();
+    const { modelRegistry } = createInvalidJsonModelRegistry();
     const ui = {
       notify: vi.fn(),
     };
@@ -2797,8 +2772,8 @@ describe("handleAgentEnd invalid reviewer JSON", () => {
 
   it("persists error and propagates invalid JSON in fail-open block mode", async () => {
     const state = createFreshState();
-    const pi = createSimplePi();
-    const modelRegistry = createInvalidJsonModelRegistry();
+    const pi = createPiMock();
+    const { modelRegistry } = createInvalidJsonModelRegistry();
 
     await expect(
       handleAgentEnd({
@@ -2841,8 +2816,10 @@ describe("handleAgentEnd invalid reviewer JSON", () => {
 
   it("persists error and propagates schema-invalid JSON in fail-open block mode", async () => {
     const state = createFreshState();
-    const pi = createSimplePi();
-    const modelRegistry = createSchemaInvalidModelRegistry();
+    const pi = createPiMock();
+    const { modelRegistry } = createInvalidJsonModelRegistry(
+      JSON.stringify({ approved: true, severity: "critical" }),
+    );
 
     await expect(
       handleAgentEnd({
@@ -2888,8 +2865,8 @@ describe("handleAgentEnd invalid reviewer JSON", () => {
 
   it("persists error without throwing invalid JSON in fail-open warn mode", async () => {
     const state = createFreshState();
-    const pi = createSimplePi();
-    const modelRegistry = createInvalidJsonModelRegistry();
+    const pi = createPiMock();
+    const { modelRegistry } = createInvalidJsonModelRegistry();
     const ui = {
       notify: vi.fn(),
     };
@@ -2942,8 +2919,8 @@ describe("handleAgentEnd invalid reviewer JSON", () => {
 
   it("does not break when ui notify is absent in fail-open warn mode", async () => {
     const state = createFreshState();
-    const pi = createSimplePi();
-    const modelRegistry = createInvalidJsonModelRegistry();
+    const pi = createPiMock();
+    const { modelRegistry } = createInvalidJsonModelRegistry();
 
     await expect(
       handleAgentEnd({
@@ -2981,8 +2958,8 @@ describe("handleAgentEnd invalid reviewer JSON", () => {
   it("creates final failure for fail-closed invalid JSON when block cycle limit is reached", async () => {
     const state = createFreshState();
     state.correctionCycle = 2;
-    const pi = createSimplePi();
-    const modelRegistry = createInvalidJsonModelRegistry();
+    const pi = createPiMock();
+    const { modelRegistry } = createInvalidJsonModelRegistry();
 
     await handleAgentEnd({
       pi,
@@ -3086,7 +3063,7 @@ describe("handleAgentEnd invalid reviewer JSON", () => {
       sendUserMessage: vi.fn(),
       exec: vi.fn(async () => ({ stdout: "" })),
     };
-    const modelRegistry = createInvalidJsonModelRegistry();
+    const { modelRegistry } = createInvalidJsonModelRegistry();
 
     await expect(
       handleAgentEnd({
@@ -3253,26 +3230,6 @@ describe("extension entrypoint command registration", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Helper utilities for command tests (Step 16.2)
-// ---------------------------------------------------------------------------
-
-function getHandlers(
-  registerCommand: ReturnType<typeof vi.fn>,
-): Map<string, (input?: unknown) => unknown> {
-  return new Map(registerCommand.mock.calls.map(([name, options]) => [name, options.handler]));
-}
-
-async function runHandler(
-  handler: ((input?: unknown) => unknown) | undefined,
-  input?: unknown,
-): Promise<unknown> {
-  if (!handler) {
-    throw new Error("Missing command handler.");
-  }
-  return await Promise.resolve(handler(input));
-}
-
-// ---------------------------------------------------------------------------
 // Step 16.2 — /review-gate-status
 // ---------------------------------------------------------------------------
 
@@ -3296,8 +3253,8 @@ describe("review gate status command", () => {
       loadConfig,
       saveConfig,
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
     expect(loadConfig).toHaveBeenCalledTimes(1);
     expect(saveConfig).not.toHaveBeenCalled();
     expect(output).toContain("# Review Gate Status");
@@ -3330,8 +3287,8 @@ describe("review gate status command", () => {
       loadConfig,
       saveConfig,
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
     expect(output).toContain("Reviewer model: test-provider/test-model");
   });
 
@@ -3353,8 +3310,8 @@ describe("review gate status command", () => {
       loadConfig,
       saveConfig,
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
     expect(output).toContain("Reviewer model: test-provider/test-model (thinking: high)");
   });
 
@@ -3373,8 +3330,8 @@ describe("review gate status command", () => {
       loadConfig,
       saveConfig,
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
     expect(output).toContain("Enabled: false");
     expect(output).toContain("Mode: warn");
   });
@@ -3384,8 +3341,8 @@ describe("review gate status command", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
@@ -3399,8 +3356,8 @@ describe("review gate status command", () => {
       exec: vi.fn(),
     };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
     expect(pi.exec).not.toHaveBeenCalled();
     expect(pi.appendEntry).not.toHaveBeenCalled();
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
@@ -3435,8 +3392,8 @@ describe("review gate on command", () => {
       loadConfig,
       saveConfig,
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
     expect(output).toBe("Review gate enabled.");
     expect(loadConfig).toHaveBeenCalledTimes(1);
     expect(saveConfig).toHaveBeenCalledTimes(1);
@@ -3485,8 +3442,8 @@ describe("review gate on command", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       enabled: true,
@@ -3504,8 +3461,8 @@ describe("review gate on command", () => {
     });
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
     expect(loadCallOrder).toEqual(["load", "save"]);
   });
 });
@@ -3535,8 +3492,8 @@ describe("review gate off command", () => {
       loadConfig,
       saveConfig,
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
     expect(output).toBe("Review gate disabled.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
@@ -3561,8 +3518,8 @@ describe("review gate off command", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       enabled: false,
@@ -3574,8 +3531,8 @@ describe("review gate off command", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
     expect(loadConfig).toHaveBeenCalledTimes(1);
     expect(saveConfig).toHaveBeenCalledTimes(1);
   });
@@ -3591,8 +3548,8 @@ describe("placeholder commands preservation", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
     expect(output).toContain("# Review Gate");
     expect(output).toContain("Status:");
   });
@@ -3602,8 +3559,8 @@ describe("placeholder commands preservation", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await expect(runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL))).resolves.toBe(
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await expect(runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL))).resolves.toBe(
       "Model registry is not available.",
     );
   });
@@ -3613,8 +3570,8 @@ describe("placeholder commands preservation", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
     expect(loadConfig).not.toHaveBeenCalled();
     expect(saveConfig).not.toHaveBeenCalled();
   });
@@ -3667,8 +3624,8 @@ describe("review gate model command — listing", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
     expect(output).toBe("Model registry is not available.");
     expect(loadConfig).not.toHaveBeenCalled();
     expect(saveConfig).not.toHaveBeenCalled();
@@ -3685,8 +3642,8 @@ describe("review gate model command — listing", () => {
       saveConfig,
       context: { modelRegistry },
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
     expect(output).toBe("Model registry does not support listing models.");
   });
 
@@ -3703,8 +3660,8 @@ describe("review gate model command — listing", () => {
       saveConfig,
       context: { modelRegistry },
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
     expect(output).toBe("No models available in registry.");
   });
 
@@ -3737,8 +3694,8 @@ describe("review gate model command — listing", () => {
       saveConfig,
       context: { modelRegistry },
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
     expect(output).toContain("# Available Reviewer Models");
     expect(output).toContain("/review-gate-model <provider>/<id> [thinkingLevel]");
     expect(output).toContain("1. test-provider/test-model — Test Model");
@@ -3760,8 +3717,8 @@ describe("review gate model command — listing", () => {
       saveConfig,
       context: { modelRegistry },
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
     expect(output).toContain("1. p1/m1");
     expect(output).not.toContain(" — ");
   });
@@ -3791,8 +3748,8 @@ describe("review gate model command — selection", () => {
       loadConfig,
       saveConfig,
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "test-provider/test-model",
     );
@@ -3824,8 +3781,8 @@ describe("review gate model command — selection", () => {
       loadConfig,
       saveConfig,
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "test-provider/test-model high",
     );
@@ -3845,8 +3802,8 @@ describe("review gate model command — selection", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "test-provider/test-model off",
     );
@@ -3867,8 +3824,8 @@ describe("review gate model command — selection", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "openrouter/deepseek/deepseek-v3.2",
     );
@@ -3888,8 +3845,8 @@ describe("review gate model command — selection", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL), {
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL), {
       args: "test-provider/test-model",
     });
     expect(output).toBe("Reviewer model set to test-provider/test-model.");
@@ -3900,8 +3857,8 @@ describe("review gate model command — selection", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL), {
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL), {
       input: "test-provider/test-model minimal",
     });
     expect(output).toBe("Reviewer model set to test-provider/test-model (thinking: minimal).");
@@ -3918,10 +3875,10 @@ describe("review gate model command — selection", () => {
       loadConfig,
       saveConfig,
     });
-    const handlers = getHandlers(pi.registerCommand);
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
     const handler = handlers.get(COMMAND_REVIEW_GATE_MODEL);
     for (const input of ["openrouter", "/openrouter", "openrouter/", "/"]) {
-      await expect(runHandler(handler, input)).resolves.toBe(
+      await expect(runCommandHandler(handler, input)).resolves.toBe(
         "Invalid reviewer model. Use /review-gate-model <provider>/<id> [thinkingLevel].",
       );
     }
@@ -3940,9 +3897,12 @@ describe("review gate model command — selection", () => {
       loadConfig,
       saveConfig,
     });
-    const handlers = getHandlers(pi.registerCommand);
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
     await expect(
-      runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL), "test-provider/test-model extreme"),
+      runCommandHandler(
+        handlers.get(COMMAND_REVIEW_GATE_MODEL),
+        "test-provider/test-model extreme",
+      ),
     ).resolves.toBe(
       "Invalid thinking level. Expected one of: off, minimal, low, medium, high, xhigh.",
     );
@@ -3954,8 +3914,11 @@ describe("review gate model command — selection", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL), "test-provider/test-model invalid");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await runCommandHandler(
+      handlers.get(COMMAND_REVIEW_GATE_MODEL),
+      "test-provider/test-model invalid",
+    );
     expect(saveConfig).not.toHaveBeenCalled();
   });
 
@@ -3976,8 +3939,8 @@ describe("review gate model command — selection", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL), "test-provider/test-model");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL), "test-provider/test-model");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       reviewerModel: {
@@ -4018,8 +3981,8 @@ describe("review gate model command — registry validation", () => {
         modelRegistry,
       },
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "test-provider/test-model",
     );
@@ -4046,8 +4009,8 @@ describe("review gate model command — registry validation", () => {
         modelRegistry,
       },
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "missing-provider/missing-model",
     );
@@ -4072,8 +4035,8 @@ describe("review gate model command — registry validation", () => {
       saveConfig,
       context: { modelRegistry },
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "test-provider/test-model",
     );
@@ -4094,8 +4057,8 @@ describe("review gate model command — registry validation", () => {
       saveConfig,
       context: { modelRegistry },
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "missing-provider/missing-model",
     );
@@ -4118,8 +4081,8 @@ describe("review gate model command — registry validation", () => {
       saveConfig,
       context: { modelRegistry },
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE_MODEL),
       "test-provider/test-model",
     );
@@ -4138,8 +4101,8 @@ describe("command preservation after model implementation", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
     expect(output).toContain("# Review Gate");
     expect(output).toContain("/review-gate model");
   });
@@ -4149,8 +4112,8 @@ describe("command preservation after model implementation", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
     expect(output).toContain("# Review Gate Status");
   });
 
@@ -4162,8 +4125,8 @@ describe("command preservation after model implementation", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
     expect(output).toBe("Review gate enabled.");
   });
 
@@ -4172,8 +4135,8 @@ describe("command preservation after model implementation", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
     expect(output).toBe("Review gate disabled.");
   });
 });
@@ -4252,8 +4215,8 @@ describe("review gate menu command", () => {
       loadConfig,
       saveConfig,
     });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
     expect(output).toContain("# Review Gate");
     expect(output).toContain("Status: enabled");
     expect(output).toContain("Mode: block");
@@ -4294,8 +4257,8 @@ describe("review gate menu command", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
     expect(output).toContain("Status: disabled");
     expect(output).toContain("Mode: warn");
     expect(output).toContain("Reviewer model: [not configured]");
@@ -4314,8 +4277,8 @@ describe("review gate menu command", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE));
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE));
     expect(output).toContain("Reviewer model: test-provider/test-model");
     expect(output).not.toContain("(thinking:");
   });
@@ -4336,8 +4299,8 @@ describe("review gate menu aliases", () => {
       exec: vi.fn(),
     };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "status");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "status");
     expect(output).toContain("# Review Gate Status");
     expect(loadConfig).toHaveBeenCalled();
     expect(saveConfig).not.toHaveBeenCalled();
@@ -4354,8 +4317,8 @@ describe("review gate menu aliases", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "on");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "on");
     expect(output).toBe("Review gate enabled.");
     expect(saveConfig).toHaveBeenCalledWith(expect.objectContaining({ enabled: true }));
   });
@@ -4368,8 +4331,8 @@ describe("review gate menu aliases", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "off");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "off");
     expect(output).toBe("Review gate disabled.");
     expect(saveConfig).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
   });
@@ -4384,8 +4347,8 @@ describe("review gate menu aliases", () => {
       ]),
     };
     registerCommands({ pi, loadConfig, saveConfig, context: { modelRegistry } });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "model");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "model");
     expect(output).toContain("# Available Reviewer Models");
     expect(saveConfig).not.toHaveBeenCalled();
   });
@@ -4399,8 +4362,8 @@ describe("review gate menu aliases", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(
       handlers.get(COMMAND_REVIEW_GATE),
       "model test-provider/test-model high",
     );
@@ -4438,8 +4401,8 @@ describe("review gate thinking subcommand", () => {
       exec: vi.fn(),
     };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking high");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking high");
     expect(output).toBe("Reviewer thinking level set to high.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
@@ -4467,8 +4430,8 @@ describe("review gate thinking subcommand", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking medium");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking medium");
     expect(output).toBe("Reviewer thinking level set to medium.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
@@ -4488,8 +4451,8 @@ describe("review gate thinking subcommand", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking high");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking high");
     expect(output).toBe("Reviewer model is not configured.");
     expect(saveConfig).not.toHaveBeenCalled();
   });
@@ -4499,8 +4462,8 @@ describe("review gate thinking subcommand", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking extreme");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "thinking extreme");
     expect(output).toBe(
       "Invalid thinking level. Expected one of: off, minimal, low, medium, high, xhigh.",
     );
@@ -4521,8 +4484,11 @@ describe("review gate thinking subcommand", () => {
       const saveConfig = vi.fn();
       const pi = { registerCommand: vi.fn() };
       registerCommands({ pi, loadConfig, saveConfig });
-      const handlers = getHandlers(pi.registerCommand);
-      const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), `thinking ${level}`);
+      const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+      const output = await runCommandHandler(
+        handlers.get(COMMAND_REVIEW_GATE),
+        `thinking ${level}`,
+      );
       expect(output).toBe(`Reviewer thinking level set to ${level}.`);
     }
   });
@@ -4547,8 +4513,8 @@ describe("review gate max-cycles subcommand", () => {
       exec: vi.fn(),
     };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 5");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 5");
     expect(output).toBe("Max correction cycles set to 5.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
@@ -4570,8 +4536,8 @@ describe("review gate max-cycles subcommand", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 3");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 3");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       maxCorrectionCycles: 3,
@@ -4583,8 +4549,8 @@ describe("review gate max-cycles subcommand", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 0");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 0");
     expect(output).toBe("Invalid max correction cycles. Expected a positive integer.");
     expect(saveConfig).not.toHaveBeenCalled();
   });
@@ -4594,8 +4560,8 @@ describe("review gate max-cycles subcommand", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles -1");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles -1");
     expect(output).toBe("Invalid max correction cycles. Expected a positive integer.");
     expect(saveConfig).not.toHaveBeenCalled();
   });
@@ -4605,8 +4571,8 @@ describe("review gate max-cycles subcommand", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 1.5");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles 1.5");
     expect(output).toBe("Invalid max correction cycles. Expected a positive integer.");
     expect(saveConfig).not.toHaveBeenCalled();
   });
@@ -4616,8 +4582,8 @@ describe("review gate max-cycles subcommand", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles abc");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "max-cycles abc");
     expect(output).toBe("Invalid max correction cycles. Expected a positive integer.");
     expect(saveConfig).not.toHaveBeenCalled();
   });
@@ -4627,10 +4593,10 @@ describe("review gate max-cycles subcommand", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
     const handler = handlers.get(COMMAND_REVIEW_GATE);
     for (const input of ["max-cycles 0", "max-cycles -1", "max-cycles 1.5", "max-cycles abc"]) {
-      await expect(runHandler(handler, input)).resolves.toBe(
+      await expect(runCommandHandler(handler, input)).resolves.toBe(
         "Invalid max correction cycles. Expected a positive integer.",
       );
     }
@@ -4662,8 +4628,8 @@ describe("review gate toggle subcommands", () => {
       exec: vi.fn(),
     };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-git-diff");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-git-diff");
     expect(output).toBe("Git diff collection enabled.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
@@ -4691,8 +4657,8 @@ describe("review gate toggle subcommands", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-git-diff");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-git-diff");
     expect(output).toBe("Git diff collection disabled.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
@@ -4718,8 +4684,8 @@ describe("review gate toggle subcommands", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-git-diff");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-git-diff");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       git: {
@@ -4753,8 +4719,11 @@ describe("review gate toggle subcommands", () => {
       exec: vi.fn(),
     };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-session-context");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(
+      handlers.get(COMMAND_REVIEW_GATE),
+      "toggle-session-context",
+    );
     expect(output).toBe("Session context disabled.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
@@ -4782,8 +4751,11 @@ describe("review gate toggle subcommands", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-session-context");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(
+      handlers.get(COMMAND_REVIEW_GATE),
+      "toggle-session-context",
+    );
     expect(output).toBe("Session context enabled.");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
@@ -4808,8 +4780,8 @@ describe("review gate toggle subcommands", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-session-context");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "toggle-session-context");
     expect(saveConfig).toHaveBeenCalledWith({
       ...currentConfig,
       context: {
@@ -4837,8 +4809,8 @@ describe("review gate manual placeholder", () => {
       sendUserMessage: vi.fn(),
     };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "manual");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "manual");
     expect(output).toBe("Manual review is not implemented yet.");
     expect(loadConfig).not.toHaveBeenCalled();
     expect(saveConfig).not.toHaveBeenCalled();
@@ -4858,8 +4830,8 @@ describe("review gate unknown subcommand", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), "unknown");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "unknown");
     expect(output).toBe("Unknown review gate command. Run /review-gate to see available commands.");
     expect(saveConfig).not.toHaveBeenCalled();
   });
@@ -4869,8 +4841,8 @@ describe("review gate unknown subcommand", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE), "foo");
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "foo");
     expect(loadConfig).not.toHaveBeenCalled();
     expect(saveConfig).not.toHaveBeenCalled();
   });
@@ -4886,9 +4858,9 @@ describe("review gate direct command preservation", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
     expect(handlers.has(COMMAND_REVIEW_GATE_STATUS)).toBe(true);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
     expect(output).toContain("# Review Gate Status");
   });
 
@@ -4897,9 +4869,9 @@ describe("review gate direct command preservation", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
     expect(handlers.has(COMMAND_REVIEW_GATE_ON)).toBe(true);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
     expect(output).toBe("Review gate enabled.");
   });
 
@@ -4908,9 +4880,9 @@ describe("review gate direct command preservation", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
     expect(handlers.has(COMMAND_REVIEW_GATE_OFF)).toBe(true);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
     expect(output).toBe("Review gate disabled.");
   });
 
@@ -4919,9 +4891,9 @@ describe("review gate direct command preservation", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
     expect(handlers.has(COMMAND_REVIEW_GATE_MODEL)).toBe(true);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
     expect(output).toBe("Model registry is not available.");
   });
 
@@ -4956,12 +4928,12 @@ describe("review gate direct command preservation", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
 
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE), "on");
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "on");
     expect(saveConfig).toHaveBeenCalledWith(expect.objectContaining({ enabled: true }));
 
-    await runHandler(handlers.get(COMMAND_REVIEW_GATE), "off");
+    await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), "off");
     expect(saveConfig).toHaveBeenCalledWith(expect.objectContaining({ enabled: false }));
   });
 });
@@ -4976,8 +4948,8 @@ describe("review gate object-style input", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), {
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), {
       args: "status",
     });
     expect(output).toContain("# Review Gate Status");
@@ -4988,8 +4960,8 @@ describe("review gate object-style input", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), {
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), {
       input: "manual",
     });
     expect(output).toBe("Manual review is not implemented yet.");
@@ -5000,8 +4972,8 @@ describe("review gate object-style input", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), {
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), {
       text: "on",
     });
     expect(output).toBe("Review gate enabled.");
@@ -5012,8 +4984,8 @@ describe("review gate object-style input", () => {
     const saveConfig = vi.fn();
     const pi = { registerCommand: vi.fn() };
     registerCommands({ pi, loadConfig, saveConfig });
-    const handlers = getHandlers(pi.registerCommand);
-    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE), {
+    const handlers = getRegisteredCommandHandlers(pi.registerCommand);
+    const output = await runCommandHandler(handlers.get(COMMAND_REVIEW_GATE), {
       foo: "bar",
     });
     expect(output).toContain("# Review Gate");
