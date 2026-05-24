@@ -115,10 +115,36 @@ type ReviewGateSessionManagerAPI = {
   getBranch?: () => unknown[] | Promise<unknown[]>;
 };
 
+/**
+ * Minimal notification API optionally provided by the host runtime.
+ * When absent, warnings are simply skipped without error.
+ */
+type ReviewGateNotificationAPI = {
+  notify?: (params: {
+    title: string;
+    message: string;
+    severity?: "info" | "warning" | "error";
+  }) => Promise<void> | void;
+};
+
 type ReviewGateHandlerContext = {
   sessionManager?: ReviewGateSessionManagerAPI;
   modelRegistry?: ModelRegistryAPI;
+  ui?: ReviewGateNotificationAPI;
 };
+
+// ---------------------------------------------------------------------------
+// Private helper: getWarningMessage
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a warning message for warn-mode notification.
+ * Uses the reviewer summary when non-empty, otherwise falls back to a
+ * stable default.
+ */
+export function getWarningMessage(result: ReviewGateResult): string {
+  return result.summary.trim().length > 0 ? result.summary : "Review was not approved.";
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -483,7 +509,16 @@ export async function handleAgentEnd(params: {
       return;
     }
 
-    // Step 15.4 will handle warn notifications.
+    // Step 15.4: Warn mode — persist, optionally notify, never block.
+    if (!result.approved && config.mode === "warn") {
+      if (config.ui.notifyOnFail && context?.ui?.notify) {
+        await context.ui.notify({
+          title: "Review gate warning",
+          message: getWarningMessage(result),
+          severity: "warning",
+        });
+      }
+    }
     return;
   } finally {
     endReview(state);

@@ -8,9 +8,9 @@ import {
 } from "../src/constants.js";
 import extensionFactory from "../src/index.js";
 import type { ReviewGateAgentEndAPI } from "../src/reviewer.js";
-import { handleAgentEnd } from "../src/reviewer.js";
+import { getWarningMessage, handleAgentEnd } from "../src/reviewer.js";
 import { createRuntimeState } from "../src/state.js";
-import type { ReviewGateConfig, RuntimeState } from "../src/types.js";
+import type { ReviewGateConfig, ReviewGateResult, RuntimeState } from "../src/types.js";
 
 // ---------------------------------------------------------------------------
 // Entrypoint smoke test (preserved)
@@ -1224,5 +1224,298 @@ describe("handleAgentEnd block rejection with follow-up", () => {
     );
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
     expect(state.activeReview).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 15.4 — Warn rejection orchestration
+// ---------------------------------------------------------------------------
+
+describe("handleAgentEnd warn rejection orchestration", () => {
+  function createFreshState(): RuntimeState {
+    return createRuntimeState();
+  }
+
+  const rejectedReviewResult: ReviewGateResult = {
+    approved: false,
+    severity: "major",
+    summary: "Delivery has issues but warn mode should not block.",
+    requiredCorrections: ["Fix the missing behavior."],
+    recommendedCorrections: ["Add tests for the warn path."],
+    evidence: ["The diff does not include the required implementation."],
+    confidence: "high",
+  };
+
+  function createGitPiMock() {
+    return {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async (command: string, args: string[]) => {
+        const joinedArgs = args.join(" ");
+        if (command !== "git") {
+          throw new Error(`Unexpected command: ${command}`);
+        }
+        if (joinedArgs === "status --short") {
+          return { stdout: " M src/reviewer.ts\n" };
+        }
+        if (joinedArgs === "diff --stat") {
+          return { stdout: " src/reviewer.ts | 10 ++++++++++\n" };
+        }
+        if (joinedArgs === "diff") {
+          return {
+            stdout: "diff --git a/src/reviewer.ts b/src/reviewer.ts\n",
+          };
+        }
+        throw new Error(`Unexpected git args: ${joinedArgs}`);
+      }),
+    };
+  }
+
+  function createRejectedModelRegistry(result: ReviewGateResult = rejectedReviewResult) {
+    const complete = vi.fn(async () => JSON.stringify(result));
+    return {
+      complete,
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    };
+  }
+
+  // ---- rejected in warn mode: persistence + no follow-up ----
+
+  it("persists rejected result without sending follow-up in warn mode", async () => {
+    const state = createFreshState();
+    const pi = createGitPiMock();
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Implement step 15.4." }],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "warn",
+        maxCorrectionCycles: 2,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+          thinkingLevel: "high",
+        },
+        ui: {
+          ...defaultConfig.ui,
+          notifyOnFail: false,
+        },
+      }),
+      context: {
+        modelRegistry,
+      },
+    });
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: false,
+          severity: "major",
+          requiredCorrections: ["Fix the missing behavior."],
+          recommendedCorrections: ["Add tests for the warn path."],
+          evidence: ["The diff does not include the required implementation."],
+        }),
+      }),
+    );
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.correctionCycle).toBe(0);
+    expect(state.activeReview).toBe(false);
+  });
+
+  // ---- optional notification when ui is available and enabled ----
+
+  it("notifies warning when ui notify is available and notifyOnFail is enabled", async () => {
+    const state = createFreshState();
+    const pi = createGitPiMock();
+    const ui = {
+      notify: vi.fn(),
+    };
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Prompt" }],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "warn",
+        maxCorrectionCycles: 2,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+        ui: {
+          ...defaultConfig.ui,
+          notifyOnFail: true,
+        },
+      }),
+      context: {
+        modelRegistry,
+        ui,
+      },
+    });
+
+    expect(ui.notify).toHaveBeenCalledWith({
+      title: "Review gate warning",
+      message: "Delivery has issues but warn mode should not block.",
+      severity: "warning",
+    });
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  // ---- graceful when ui notify absent ----
+
+  it("does not fail when ui notify is unavailable in warn mode", async () => {
+    const state = createFreshState();
+    const pi = createGitPiMock();
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...defaultConfig,
+          enabled: true,
+          mode: "warn",
+          maxCorrectionCycles: 2,
+          reviewerModel: {
+            provider: "test-provider",
+            id: "test-model",
+          },
+          ui: {
+            ...defaultConfig.ui,
+            notifyOnFail: true,
+          },
+        }),
+        context: {
+          modelRegistry,
+        },
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: false,
+        }),
+      }),
+    );
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  // ---- empty summary fallback ----
+
+  it("uses a fallback warning message when reviewer summary is empty", () => {
+    const resultWithEmptySummary: ReviewGateResult = {
+      ...rejectedReviewResult,
+      summary: "",
+    };
+
+    expect(getWarningMessage(resultWithEmptySummary)).toBe("Review was not approved.");
+  });
+
+  it("uses reviewer summary when non-empty", () => {
+    expect(getWarningMessage(rejectedReviewResult)).toBe(
+      "Delivery has issues but warn mode should not block.",
+    );
+  });
+
+  // ---- no final failure even at cycle limit ----
+
+  it("does not create final failure in warn mode even when correction cycle limit is reached", async () => {
+    const state = createFreshState();
+    state.correctionCycle = 2;
+    const pi = createGitPiMock();
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Prompt" }],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "warn",
+        maxCorrectionCycles: 2,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+      }),
+      context: {
+        modelRegistry,
+      },
+    });
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: false,
+        }),
+      }),
+    );
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+    expect(state.activeReview).toBe(false);
+  });
+
+  // ---- block mode preserved ----
+
+  it("preserves block mode follow-up behavior", async () => {
+    const state = createFreshState();
+    const pi = createGitPiMock();
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Prompt" }],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "block",
+        maxCorrectionCycles: 2,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+      }),
+      context: {
+        modelRegistry,
+      },
+    });
+
+    expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
+    const [message, options] = pi.sendUserMessage.mock.calls[0];
+    expect(message.startsWith(CORRECTION_REQUEST_MARKER)).toBe(true);
+    expect(options).toEqual({ deliverAs: "followUp" });
   });
 });
