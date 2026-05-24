@@ -57,7 +57,6 @@ function createGitExecMock() {
   });
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: shared infrastructure helper for Step 18.1
 function createNonGitExecMock() {
   return vi.fn(async () => {
     throw {
@@ -156,7 +155,6 @@ function createInvalidJsonModelRegistry(jsonText = "{ invalid json }") {
   };
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: shared infrastructure helper for Step 18.1
 function createFailingModelRegistry(message = "model failed") {
   const complete = vi.fn(async () => {
     throw new Error(message);
@@ -187,7 +185,6 @@ function createSessionManagerMock(branch: unknown[] = []) {
   };
 }
 
-// biome-ignore lint/correctness/noUnusedVariables: shared infrastructure helper for Step 18.1
 function createUiMock() {
   return {
     notify: vi.fn(),
@@ -698,6 +695,586 @@ describe("handleAgentEnd early returns", () => {
 
     expect(state.activeReview).toBe(true);
     expect(pi.appendEntry).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Decision matrix — consolidated integration tests
+// ---------------------------------------------------------------------------
+
+describe("handleAgentEnd decision matrix", () => {
+  // =========================================================================
+  // 1. Approved — block mode
+  // =========================================================================
+
+  it("approved: persists result with no follow-up, no error, no final failure", async () => {
+    const state = createFreshState();
+    const pi = createPiMock({ exec: createGitExecMock() });
+    const { complete, modelRegistry } = createApprovedModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: { messages: [{ role: "user", content: "Approve this delivery." }] },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "block",
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+          thinkingLevel: "high",
+        },
+      }),
+      context: { modelRegistry },
+    });
+
+    // 1. Git commands are called
+    expect(pi.exec).toHaveBeenCalledWith("git", ["status", "--short"], expect.any(Object));
+    expect(pi.exec).toHaveBeenCalledWith("git", ["diff", "--stat"], expect.any(Object));
+    expect(pi.exec).toHaveBeenCalledWith("git", ["diff"], expect.any(Object));
+
+    // 2. Model registry is used
+    expect(modelRegistry.find).toHaveBeenCalledWith("test-provider", "test-model");
+
+    // 3. Model complete is called
+    expect(complete).toHaveBeenCalled();
+
+    // 4-7. Result persisted with approved payload
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        attempt: 0,
+        model: { provider: "test-provider", id: "test-model", thinkingLevel: "high" },
+        result: expect.objectContaining({
+          approved: true,
+          severity: "pass",
+          summary: "Delivery satisfies the request.",
+          requiredCorrections: [],
+          recommendedCorrections: [],
+          evidence: ["Reviewer approved the delivery."],
+          confidence: "high",
+        }),
+      }),
+    );
+
+    // 8. No follow-up
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // 9-10. No final failure or error entries
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
+
+    // 11. activeReview released
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =========================================================================
+  // 2. Rejected block — cycles available
+  // =========================================================================
+
+  it("rejected block with cycles available: persists result, sends CORRECTION_REQUEST_MARKER follow-up", async () => {
+    const state = createFreshState();
+    state.correctionCycle = 0;
+    const pi = createPiMock({ exec: createGitExecMock() });
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: { messages: [{ role: "user", content: "Reject this delivery." }] },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "block",
+        maxCorrectionCycles: 2,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+      }),
+      context: { modelRegistry },
+    });
+
+    // 1. Result persisted in REVIEW_RESULT
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: false,
+        }),
+      }),
+    );
+
+    // 2-4. Payload preserves requiredCorrections and evidence
+    const resultCall = vi
+      .mocked(pi.appendEntry)
+      .mock.calls.find(([type]) => type === CUSTOM_ENTRY_REVIEW_RESULT);
+    const payload = resultCall?.[1] as { result: ReviewGateResult };
+    expect(payload.result.approved).toBe(false);
+    expect(payload.result.requiredCorrections).toEqual(["Fix the missing behavior."]);
+    expect(payload.result.evidence).toEqual(["The diff does not include the required change."]);
+
+    // 5-6. Follow-up sent with marker
+    expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
+    const [message, options] = vi.mocked(pi.sendUserMessage).mock.calls[0];
+    expect(message.startsWith(CORRECTION_REQUEST_MARKER)).toBe(true);
+
+    // 7. Follow-up contains required corrections
+    expect(message).toContain("Fix the missing behavior.");
+
+    // 8. Envio usa deliverAs: "followUp"
+    expect(options).toEqual({ deliverAs: "followUp" });
+
+    // 9-10. No final failure or error
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
+
+    // 11. correctionCycle not incremented manually
+    expect(state.correctionCycle).toBe(0);
+
+    // 12. activeReview released
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =========================================================================
+  // 3. Rejected block — limit reached
+  // =========================================================================
+
+  it("rejected block with limit reached: persists result and final failure, no follow-up", async () => {
+    const state = createFreshState();
+    state.correctionCycle = 1;
+    const pi = createPiMock({ exec: createGitExecMock() });
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [
+          {
+            role: "user",
+            content: `${CORRECTION_REQUEST_MARKER}\n# Mandatory Review Corrections\nPlease fix.`,
+          },
+        ],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "block",
+        maxCorrectionCycles: 2,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+      }),
+      context: { modelRegistry },
+    });
+
+    // 1. Result is persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({ approved: false }),
+      }),
+    );
+
+    // 2. Final failure is persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_FINAL_FAILURE,
+      expect.objectContaining({
+        attempt: 2,
+        maxCorrectionCycles: 2,
+        model: { provider: "test-provider", id: "test-model" },
+        reason: "Maximum correction cycles exceeded.",
+        result: expect.objectContaining({ approved: false }),
+      }),
+    );
+
+    // 4. No follow-up
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // 5. No error entry
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
+
+    // 6. activeReview released
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =========================================================================
+  // 4. Rejected warn
+  // =========================================================================
+
+  it("rejected warn: persists result, no follow-up, optionally notifies", async () => {
+    const state = createFreshState();
+    const pi = createPiMock({ exec: createGitExecMock() });
+    const { modelRegistry } = createRejectedModelRegistry();
+    const ui = createUiMock();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: { messages: [{ role: "user", content: "Reject in warn mode." }] },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "warn",
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+        ui: {
+          ...defaultConfig.ui,
+          notifyOnFail: true,
+        },
+      }),
+      context: { modelRegistry, ui },
+    });
+
+    // 1-2. Result persisted with approved: false
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({ approved: false }),
+      }),
+    );
+
+    // 3. No follow-up
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // 4-5. No final failure or error
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
+
+    // 6. ctx.ui.notify is called
+    expect(ui.notify).toHaveBeenCalledWith({
+      title: "Review gate warning",
+      message: expect.any(String),
+      severity: "warning",
+    });
+
+    // 7-8. correctionCycle not incremented, activeReview released
+    expect(state.correctionCycle).toBe(0);
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =========================================================================
+  // 5. Model missing
+  // =========================================================================
+
+  it("model missing: persists skip, no git/model/follow-up calls", async () => {
+    const state = createFreshState();
+    const pi = createPiMock();
+    const modelRegistry = { find: vi.fn() };
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: { messages: [{ role: "user", content: "Review me." }] },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        reviewerModel: null,
+      }),
+      context: { modelRegistry },
+    });
+
+    // 1-2. Skip entry with reason and null model
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_SKIPPED,
+      expect.objectContaining({
+        reason: "Reviewer model is not configured.",
+        model: null,
+      }),
+    );
+
+    // 3-4. Git exec and model registry not called
+    expect(pi.exec).not.toHaveBeenCalled();
+    expect(modelRegistry.find).not.toHaveBeenCalled();
+
+    // 5. No follow-up
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // 6. No result, final failure, or error entries
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, expect.anything());
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
+
+    // 7. activeReview released
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =========================================================================
+  // 6. Gate disabled
+  // =========================================================================
+
+  it("gate disabled: returns early with no side effects", async () => {
+    const state = createFreshState();
+    const pi = createPiMock();
+    const modelRegistry = { find: vi.fn() };
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: { messages: [{ role: "user", content: "Prompt." }] },
+      loadConfig: async () => ({ ...defaultConfig, enabled: false }),
+      context: { modelRegistry },
+    });
+
+    // 1-4. No side effects
+    expect(pi.exec).not.toHaveBeenCalled();
+    expect(pi.appendEntry).not.toHaveBeenCalled();
+    expect(modelRegistry.find).not.toHaveBeenCalled();
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // 5. activeReview remains false
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =========================================================================
+  // 7. Active review
+  // =========================================================================
+
+  it("active review: returns early, preserves activeReview, no side effects", async () => {
+    const state = createFreshState();
+    state.activeReview = true;
+    const pi = createPiMock();
+    const modelRegistry = { find: vi.fn() };
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: { messages: [{ role: "user", content: "Prompt." }] },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+      }),
+      context: { modelRegistry },
+    });
+
+    // 1-5. No side effects
+    expect(pi.exec).not.toHaveBeenCalled();
+    expect(pi.appendEntry).not.toHaveBeenCalled();
+    expect(modelRegistry.find).not.toHaveBeenCalled();
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // 6. activeReview remains true
+    expect(state.activeReview).toBe(true);
+  });
+
+  // =========================================================================
+  // 8. Invalid JSON fail-closed block
+  // =========================================================================
+
+  it("invalid JSON fail-closed block: treats as blocking result, sends follow-up with marker", async () => {
+    const state = createFreshState();
+    const pi = createPiMock();
+    const { modelRegistry } = createInvalidJsonModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: { messages: [{ role: "user", content: "Give me invalid JSON." }] },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "block",
+        maxCorrectionCycles: 2,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+        reviewer: {
+          ...defaultConfig.reviewer,
+          failClosedOnInvalidJson: true,
+        },
+      }),
+      context: { modelRegistry },
+    });
+
+    // 1. Resolves without throwing when cycles available
+
+    // 2. Result persisted as review result
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: false,
+          severity: "blocking",
+          summary: "Reviewer returned an invalid response.",
+          evidence: expect.arrayContaining([expect.stringMatching(/^Invalid reviewer response:/)]),
+        }),
+      }),
+    );
+
+    // 4. Follow-up sent with marker
+    expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
+    const [message] = vi.mocked(pi.sendUserMessage).mock.calls[0];
+    expect(message.startsWith(CORRECTION_REQUEST_MARKER)).toBe(true);
+
+    // 6. No error entry
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
+
+    // 7. activeReview released
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =========================================================================
+  // 9. Invalid JSON fail-open block
+  // =========================================================================
+
+  it("invalid JSON fail-open block: persists error and propagates, no review result", async () => {
+    const state = createFreshState();
+    const pi = createPiMock();
+    const { modelRegistry } = createInvalidJsonModelRegistry();
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: { messages: [{ role: "user", content: "Give me invalid JSON." }] },
+        loadConfig: async () => ({
+          ...defaultConfig,
+          enabled: true,
+          mode: "block",
+          reviewerModel: {
+            provider: "test-provider",
+            id: "test-model",
+          },
+          reviewer: {
+            ...defaultConfig.reviewer,
+            failClosedOnInvalidJson: false,
+          },
+        }),
+        context: { modelRegistry },
+      }),
+    ).rejects.toThrow("Invalid reviewer response:");
+
+    // 2. Error entry persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        error: expect.objectContaining({
+          message: expect.stringContaining("Invalid reviewer response:"),
+        }),
+      }),
+    );
+
+    // 3-5. No result, no final failure, no follow-up
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, expect.anything());
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // 6. activeReview released
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =========================================================================
+  // 10. Model failure block
+  // =========================================================================
+
+  it("model failure block: persists error and propagates, no result entries", async () => {
+    const state = createFreshState();
+    const pi = createPiMock();
+    const { modelRegistry } = createFailingModelRegistry();
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: { messages: [{ role: "user", content: "Trigger model failure." }] },
+        loadConfig: async () => ({
+          ...defaultConfig,
+          enabled: true,
+          mode: "block",
+          reviewerModel: {
+            provider: "test-provider",
+            id: "test-model",
+          },
+        }),
+        context: { modelRegistry },
+      }),
+    ).rejects.toThrow("model failed");
+
+    // 2. Error entry persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        error: expect.objectContaining({ message: "model failed" }),
+      }),
+    );
+
+    // 3-5. No result, no final failure, no follow-up
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, expect.anything());
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // 6. activeReview released
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =========================================================================
+  // 11. Git unavailable
+  // =========================================================================
+
+  it("git unavailable: continues review, model receives context marker, persists approved result", async () => {
+    const state = createFreshState();
+    const pi = createPiMock({ exec: createNonGitExecMock() });
+    const complete = vi.fn(async () =>
+      JSON.stringify({
+        approved: true,
+        severity: "pass",
+        summary: "Delivery satisfies the request.",
+        requiredCorrections: [],
+        recommendedCorrections: [],
+        evidence: ["Review completed even without Git context."],
+        confidence: "high",
+      }),
+    );
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete,
+      })),
+    };
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Approve without git." }],
+      },
+      loadConfig: async () => createConfigWithReviewerModel(),
+      context: { modelRegistry },
+    });
+
+    // 1. Resolves without throwing
+
+    // 2-3. Model is called with prompt containing Git context marker
+    expect(complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userPrompt: expect.stringContaining("Git context unavailable: not a git repository"),
+      }),
+    );
+
+    // 4. Result persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({ approved: true }),
+      }),
+    );
+
+    // 5. No follow-up
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // 6. activeReview released
+    expect(state.activeReview).toBe(false);
   });
 });
 
