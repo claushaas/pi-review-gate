@@ -308,7 +308,9 @@ pnpm test               # Vitest test suite
 
 ### Manual validation
 
-A manual validation checklist covering `/reload`, command registration, config persistence, and runtime behavior is available at [`docs/manual-validation.md`](docs/manual-validation.md). This checklist is designed for execution inside the Pi Runtime after the extension is loaded.
+A manual validation checklist covering `/reload`, command registration, config persistence, approved/block/warn agent_end flows, and runtime behavior is available at [`docs/manual-validation.md`](docs/manual-validation.md). This checklist is designed for execution inside the Pi Runtime after the extension is loaded.
+
+**Step 20.2 status:** The validation checklist for approved, rejected-block, rejected-warn, persistence, follow-up marker, and audit entries has been prepared. Automated validations (typecheck, biome, vitest) passed with 0 errors. Manual runtime execution is pending — the checklist is ready for execution inside the Pi Runtime.
 
 ## Manual smoke test
 
