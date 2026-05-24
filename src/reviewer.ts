@@ -3,13 +3,16 @@ import {
   CUSTOM_ENTRY_REVIEW_RESULT,
   CUSTOM_ENTRY_REVIEW_SKIPPED,
 } from "./constants.js";
+import { extractCurrentUserPrompt } from "./context.js";
 import type { ModelClient } from "./model.js";
 import { safeParseReviewGateResult } from "./schema.js";
+import { beginReview, endReview, updateCycleState } from "./state.js";
 import type {
   ReviewContext,
   ReviewerModelConfig,
   ReviewGateConfig,
   ReviewGateResult,
+  RuntimeState,
 } from "./types.js";
 
 // ---------------------------------------------------------------------------
@@ -81,6 +84,23 @@ ${nullableTextOrMarker(context.gitDiff, "[not available]")}
 ## Git Unavailable Reason
 ${optionalTextOrMarker(context.gitUnavailableReason, "[none]")}`;
 }
+
+// ---------------------------------------------------------------------------
+// Agent end handler types
+// ---------------------------------------------------------------------------
+
+type ReviewGateAgentEndAPI = {
+  appendEntry(type: string, payload: unknown): Promise<void> | void;
+};
+
+export type { ReviewGateAgentEndAPI };
+
+type ReviewGateAgentEndEvent = {
+  messages?: unknown[];
+  signal?: AbortSignal;
+};
+
+export type { ReviewGateAgentEndEvent };
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -326,6 +346,72 @@ export async function persistReviewSkipped(params: {
  * @param params.reason              - Why the review is considered a final failure.
  * @param params.timestamp           - Optional ISO-8601 timestamp; defaults to `new Date().toISOString()`.
  */
+// ---------------------------------------------------------------------------
+// handleAgentEnd
+// ---------------------------------------------------------------------------
+
+/**
+ * Handles the `agent_end` event from the Pi runtime.
+ *
+ * Implements early returns that gate the review workflow:
+ * 1. Loads configuration and returns immediately when disabled.
+ * 2. Returns immediately when a review is already active.
+ * 3. Extracts the current user prompt from event messages.
+ * 4. Updates cycle state (reset for real prompts, increment for injected prompts).
+ * 5. Begins the review guard and persists a skip entry when the reviewer model
+ *    is not configured.
+ *
+ * The active review guard is always released in a `finally` block after
+ * `beginReview` succeeds.
+ *
+ * Future phases will continue after this point with Git context collection,
+ * {@link ReviewContext} assembly, reviewer invocation, and follow-up dispatch.
+ */
+export async function handleAgentEnd(params: {
+  pi: ReviewGateAgentEndAPI;
+  state: RuntimeState;
+  event: ReviewGateAgentEndEvent;
+  loadConfig: () => Promise<ReviewGateConfig>;
+}): Promise<void> {
+  const { pi, state, event, loadConfig } = params;
+
+  const config = await loadConfig();
+  if (!config.enabled) {
+    return;
+  }
+
+  if (state.activeReview) {
+    return;
+  }
+
+  const eventMessages = Array.isArray(event.messages) ? event.messages : [];
+  const currentUserPrompt = extractCurrentUserPrompt(eventMessages);
+
+  updateCycleState({
+    state,
+    currentUserPrompt,
+  });
+
+  if (!beginReview(state)) {
+    return;
+  }
+
+  try {
+    if (config.reviewerModel === null) {
+      await persistReviewSkipped({
+        pi,
+        reason: "Reviewer model is not configured.",
+        model: null,
+      });
+      return;
+    }
+
+    // Future phases continue here.
+  } finally {
+    endReview(state);
+  }
+}
+
 export async function persistReviewFinalFailure(params: {
   pi: ReviewGateAppendEntryAPI;
   result: ReviewGateResult;
