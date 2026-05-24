@@ -404,3 +404,380 @@ No production code was altered in this step. Adjustments listed here only if run
 | Persistence (appendEntry) | Yes | No (this environment) | Pending runtime execution |
 | Follow-up marker | Yes | No (this environment) | Pending runtime execution |
 | Audit entries | Yes | No (this environment) | Pending runtime execution |
+
+---
+
+# Manual Validation — Step 20.3
+
+> **Status:** Manual runtime validation was not executed in this environment.
+> The checklist below is prepared for execution inside the Pi Runtime.
+> Automated validations (typecheck, biome, vitest, structural) all passed.
+
+## Environment
+
+- **Date:** (fill in during execution)
+- **Pi version:** (fill in: `pi --version`)
+- **Node version:** (fill in: `node --version`)
+- **Package manager:** pnpm
+- **Extension path:** `/Users/claus/.pi/agent/extensions/pi-review-gate`
+- **Config path:** `~/.config/pi-review-gate/config.json`
+- **Reviewer provider/id:** (fill in, e.g. `openrouter/deepseek/deepseek-v3.2`)
+- **Reviewer thinking level:** (fill in, e.g. `high`)
+- **Git repository path:** (fill in: path to a valid Git repo)
+- **Non-Git directory path:** (fill in: path to a directory outside a Git repo)
+
+## Pre-flight
+
+### Pre-flight (automated — this environment)
+
+- [x] Dependencies installed (`pnpm install`)
+- [x] Typecheck passed (`pnpm typecheck` — 0 errors)
+- [x] Biome/check passed (`pnpm check` — 29 files, no fixes)
+- [x] Vitest passed (`pnpm test` — 671 tests)
+- [x] `commands.ts` scope: no Git, no reviewer, no model, no sendUserMessage, no appendEntry
+- [x] No dependency changes (`git diff -- package.json` is empty)
+- [x] `index.ts` remains thin (wires hook + commands, no heavy logic)
+- [x] Structural checks passed (entrypoint, hook, Git, cycles, marker, constants)
+
+### Pre-flight (manual — execute inside Pi Runtime)
+
+- [ ] Extension loaded with `/reload` (no errors)
+- [ ] `/review-gate-status` responds
+- [ ] Reviewer model configured (`/review-gate-model <provider>/<id> [thinkingLevel]`)
+- [ ] Review gate enabled (`/review-gate-on`)
+- [ ] `mode` set to `block` for cycle validation
+- [ ] `maxCorrectionCycles` set to `2` (`/review-gate max-cycles 2`)
+- [ ] Config local exists at `~/.config/pi-review-gate/config.json`
+- [ ] Git repository available for Git context tests
+- [ ] Non-Git directory available for unavailable-Git tests
+
+## Correction cycles
+
+### Setup
+
+```json
+{
+  "enabled": true,
+  "mode": "block",
+  "reviewerModel": {
+    "provider": "<provider>",
+    "id": "<model-id>",
+    "thinkingLevel": "high"
+  },
+  "maxCorrectionCycles": 2
+}
+```
+
+### Scenario
+
+Trigger a task expected to be rejected. Use a prompt that asks for a verifiable change and then deliver intentionally incomplete work. When the reviewer rejects the first delivery, the injected follow-up creates a second cycle. If the second delivery is also rejected (or the agent fails to address corrections adequately), the cycle limit should be reached.
+
+### Expected criteria
+
+- [ ] Trigger a task expected to be rejected
+- [ ] First rejected review creates `pi-review-gate-result` entry
+- [ ] First rejected review injects follow-up
+- [ ] Follow-up starts with `[pi-review-gate:correction-request]`
+- [ ] Follow-up contains `# Mandatory Review Corrections` header
+- [ ] Follow-up includes `## Required Corrections` with numbered items
+- [ ] Follow-up includes `## Evidence` with numbered items
+- [ ] Agent responds to first correction request (cycle increments to 1)
+- [ ] Second rejected review creates `pi-review-gate-result` entry (attempt 1)
+- [ ] Second rejected review injects second follow-up if cycles remain
+- [ ] After cycle limit is reached (`attempt >= maxCorrectionCycles`), no new follow-up is injected
+- [ ] `pi-review-gate-final-failure` entry is created
+- [ ] Final failure payload contains `attempt`, `maxCorrectionCycles`, `model`, `reason`, `result`
+- [ ] Final failure reason is exactly: `Maximum correction cycles exceeded.`
+- [ ] No infinite loop occurs
+- [ ] A subsequent real user prompt (without the marker) resets cycle state
+
+### Observed result
+
+- **Result:** (fill in: pass / fail / partial)
+- **Notes:** (fill in)
+- **Cycles observed:** (fill in: number of cycles before final failure)
+- **Final failure entry visible?** (fill in: yes / no)
+
+## Git context — valid repository
+
+### Setup
+
+```json
+{
+  "enabled": true,
+  "mode": "block",
+  "reviewerModel": {
+    "provider": "<provider>",
+    "id": "<model-id>"
+  },
+  "git": {
+    "enabled": true,
+    "includeStatus": true,
+    "includeDiffStat": true,
+    "includeDiff": true
+  }
+}
+```
+
+### Scenario
+
+Run validation inside a Git repository with local changes (modified files, staged changes, or both). Execute a simple task and verify that the reviewer's context contains Git evidence.
+
+### Expected criteria
+
+- [ ] Run the extension inside a Git repository with local changes
+- [ ] `git status --short` is collected and present in reviewer context
+- [ ] `git diff --stat` is collected and present in reviewer context (when enabled)
+- [ ] `git diff` is collected and present in reviewer context (when enabled)
+- [ ] Reviewer prompt/context contains Git Status, Git Diff Stat, and Git Diff sections
+- [ ] Review still completes normally (no Git-specific failure)
+- [ ] No Git-specific error entry is created
+- [ ] `pi-review-gate-result` entry is created normally
+- [ ] No `pi-review-gate-error` entry triggered by Git alone
+
+### Observed result
+
+- **Result:** (fill in: pass / fail / partial)
+- **Notes:** (fill in)
+- **Git sections visible?** (fill in: which of status/diff-stat/diff)
+
+## Git context — non-Git directory
+
+### Setup
+
+Use the same configuration as above. Ensure the working directory is **not** inside a Git repository (or has no `.git` directory).
+
+### Scenario
+
+Run validation outside a Git repository. Verify that the review does not fail automatically and that the reviewer receives an "unavailable" message.
+
+### Expected criteria
+
+- [ ] Run the extension outside a Git repository
+- [ ] Review does **not** fail automatically
+- [ ] Reviewer prompt/context contains `Git context unavailable: not a git repository.` in the Git Unavailable Reason section
+- [ ] Result is determined by the reviewer, not by Git failure alone
+- [ ] No follow-up is injected solely because Git is unavailable
+- [ ] No `pi-review-gate-final-failure` is created solely because Git is unavailable
+- [ ] No `pi-review-gate-error` entry is triggered by non-Git condition alone
+- [ ] `activeReview` is released after the handler completes
+
+### Observed result
+
+- **Result:** (fill in: pass / fail / partial)
+- **Notes:** (fill in)
+- **Unavailable reason visible?** (fill in: yes / no)
+
+## Git context — large diff
+
+### Setup
+
+Use the same configuration as above. Create or use a Git repository with a large diff (more than `git.maxDiffChars` characters, default 60000).
+
+### Scenario
+
+Generate or stage a large file change and trigger the review gate. Verify that the diff is truncated with the expected marker.
+
+### Expected criteria
+
+- [ ] Create or use a repository with a large diff exceeding the truncation limit
+- [ ] Review runs without payload failure
+- [ ] Diff output in reviewer context is truncated
+- [ ] Truncation marker `[TRUNCATED: original length ..., included first ... chars]` is visible in the Git Diff section
+- [ ] Marker includes the original length and the number of characters included
+- [ ] Review completes normally (approved or rejected by reviewer, not by truncation)
+
+### Observed result
+
+- **Result:** (fill in: pass / fail / partial)
+- **Notes:** (fill in)
+- **Truncation marker visible?** (fill in: yes / no)
+- **Original and included sizes correct?** (fill in: yes / no)
+
+## Missing reviewer model
+
+### Setup
+
+```json
+{
+  "enabled": true,
+  "reviewerModel": null
+}
+```
+
+Set `reviewerModel` to `null` by manually editing `~/.config/pi-review-gate/config.json`, or use `/review-gate-model` with a deliberately absent model and verify the persisted `null` state.
+
+### Scenario
+
+With no reviewer model configured, trigger an agent task. The review should be skipped cleanly.
+
+### Expected criteria
+
+- [ ] Set `reviewerModel` to `null`
+- [ ] Trigger an agent task
+- [ ] Review is skipped (no model call, no prompt built)
+- [ ] `pi-review-gate-skipped` entry is created
+- [ ] Skip entry payload contains `reason: "Reviewer model is not configured."`
+- [ ] Skip entry payload contains `model: null`
+- [ ] Skip entry payload contains `timestamp`
+- [ ] Git is **not** collected (no `git status`, `git diff`, etc.)
+- [ ] Model is **not** called
+- [ ] No follow-up is injected
+- [ ] No `pi-review-gate-final-failure` entry is created
+- [ ] No `pi-review-gate-error` entry is created
+- [ ] `activeReview` is released after the handler completes
+
+### Observed result
+
+- **Result:** (fill in: pass / fail / partial)
+- **Notes:** (fill in)
+- **Skip entry visible?** (fill in: yes / no)
+
+## Operational failures
+
+### Model failure or timeout (optional)
+
+If safely reproducible in the Pi Runtime, configure an invalid model ID or set `reviewer.timeoutMs` to a very low value (e.g., `100`) to force a timeout.
+
+- [ ] **Not executed in this environment** (or fill in result if executed)
+
+#### Expected criteria (if executed)
+
+- [ ] Failure creates `pi-review-gate-error` entry
+- [ ] Entry payload contains `phase` ("model" or "reviewer")
+- [ ] Entry payload contains `error.name` and `error.message`
+- [ ] Failure does **not** create `pi-review-gate-result`
+- [ ] Failure does **not** inject invented corrections
+- [ ] In `block` mode, the agent sees a visible error (model error is thrown)
+- [ ] In `warn` mode, the error is recorded without blocking the agent
+- [ ] `activeReview` is released after failure
+
+#### Observed result (if executed)
+
+- **Result:** (fill in: pass / fail / partial / not executed)
+- **Notes:** (fill in)
+
+### Invalid reviewer JSON (optional)
+
+If safely reproducible, configure a model that returns non-JSON or markdown output.
+
+- [ ] **Not executed in this environment** (or fill in result if executed)
+
+#### Expected criteria — fail-closed (`failClosedOnInvalidJson: true`, default)
+
+- [ ] Invalid JSON is treated as a blocking rejection
+- [ ] `pi-review-gate-result` entry is created with `approved: false`
+- [ ] Result summary indicates invalid reviewer response
+- [ ] In `block` mode with cycles remaining, follow-up is injected
+- [ ] In `warn` mode, no follow-up is injected
+
+#### Expected criteria — fail-open (`failClosedOnInvalidJson: false`)
+
+- [ ] Invalid JSON creates `pi-review-gate-error` entry
+- [ ] Does **not** create `pi-review-gate-result`
+- [ ] Does **not** inject invented corrections
+- [ ] In `block` mode, the error is thrown and visible
+- [ ] In `warn` mode, the error is recorded without blocking
+
+#### Observed result (if executed)
+
+- **Result:** (fill in: pass / fail / partial / not executed)
+- **Notes:** (fill in)
+
+## Persistence
+
+### Expected entries
+
+| Entry type | When created | Verified |
+|---|---|---|
+| `pi-review-gate-result` | Every review decision (approved or rejected) | (fill in) |
+| `pi-review-gate-skipped` | Reviewer model is not configured | (fill in) |
+| `pi-review-gate-final-failure` | Maximum correction cycles exceeded | (fill in) |
+| `pi-review-gate-error` | Model/reviewer operational failure | (fill in) |
+
+### Entry field verification
+
+- [ ] `pi-review-gate-result` entries include `timestamp`, `attempt`, `model`, `result`
+- [ ] `pi-review-gate-skipped` entries include `timestamp`, `reason`, `model`
+- [ ] `pi-review-gate-final-failure` entries include `timestamp`, `attempt`, `maxCorrectionCycles`, `model`, `reason`, `result`
+- [ ] `pi-review-gate-error` entries include `timestamp`, `phase`, `attempt`, `model`, `error`
+- [ ] Config changes persist across `/reload`
+
+## Follow-up marker verification
+
+- [ ] Marker `[pi-review-gate:correction-request]` is the first line of every injected follow-up
+- [ ] Marker is used by `state.ts` to distinguish real prompts from injected correction prompts
+- [ ] Marker is defined centrally in `src/constants.ts` as `CORRECTION_REQUEST_MARKER`
+- [ ] Marker does **not** appear in any non-follow-up context (status, commands, etc.)
+
+## Command verification
+
+- [ ] `/reload` works end-to-end (extension loads, hooks register, commands available)
+- [ ] `/review-gate-status` responds with current config
+- [ ] `/review-gate-model <provider>/<id> [thinkingLevel]` sets reviewer model
+- [ ] `/review-gate-on` enables the gate
+- [ ] `/review-gate-off` disables the gate
+- [ ] `/review-gate` menu shows all sub-commands
+- [ ] `/review-gate max-cycles 2` sets and persists cycle limit
+- [ ] `/review-gate toggle-git-diff` toggles `git.includeDiff`
+- [ ] `/review-gate toggle-session-context` toggles `context.includeSessionSlice`
+
+## Runtime API divergence log
+
+| Concern | Observed at runtime? | Resolution |
+|---|---|---|
+| Command handler signature mismatch | (fill in) | (fill in) |
+| Command output display (return vs notify) | (fill in) | (fill in) |
+| `agent_end` event shape | (fill in) | (fill in) |
+| `pi.sendUserMessage` API shape | (fill in) | (fill in) |
+| `pi.appendEntry` API shape | (fill in) | (fill in) |
+| `pi.exec` result shape for Git errors | (fill in) | (fill in) |
+| `ctx.sessionManager.getBranch()` availability | (fill in) | (fill in) |
+| `ctx.modelRegistry` API shape | (fill in) | (fill in) |
+
+## Adjustments applied (if any)
+
+No production code was altered in this step. Adjustments listed here only if runtime validation revealed incompatibility.
+
+| File | Change | Reason | Validation after |
+|---|---|---|---|
+| (none) | — | — | — |
+
+## Architecture confirmation
+
+- [x] `src/commands.ts` does not call Git, model, reviewer, sendUserMessage, or appendEntry
+- [x] `src/index.ts` remains thin — only wires hook + commands
+- [x] No new dependencies added
+- [x] `manual` review remains placeholder (`"Manual review is not implemented yet."`)
+- [x] No new review orchestration, commands, or policies were added
+- [x] No model retry, fallback, or automatic model switching was implemented
+- [x] No new config fields were added
+- [x] No schema changes were made
+- [x] No new runtime hooks beyond existing `agent_end` were added
+
+## Notes — Step 20.3
+
+- **Observed issues:** (fill in during execution)
+
+- **Runtime API mismatches:**
+  - (fill in if any were confirmed during execution)
+
+- **Follow-up actions:**
+  - Address any runtime API mismatches discovered during validation
+  - V1 is complete when this checklist is executed successfully in the Pi Runtime
+  - Consider V2 features after V1 validation confirms stability
+
+## Result summary — Step 20.3
+
+| Scenario | Checklist prepared | Executed in Pi Runtime | Result |
+|---|---|---|---|
+| Correction cycles (max 2) | Yes | No (this environment) | Pending runtime execution |
+| Git — valid repository | Yes | No (this environment) | Pending runtime execution |
+| Git — non-Git directory | Yes | No (this environment) | Pending runtime execution |
+| Git — large diff truncation | Yes | No (this environment) | Pending runtime execution |
+| Missing reviewer model | Yes | No (this environment) | Pending runtime execution |
+| Model failure / timeout (optional) | Yes | No (this environment) | Not executed |
+| Invalid reviewer JSON (optional) | Yes | No (this environment) | Not executed |
+| Persistence (appendEntry) | Yes | No (this environment) | Pending runtime execution |
+| Follow-up marker | Yes | No (this environment) | Pending runtime execution |
+| Final failure (max cycles) | Yes | No (this environment) | Pending runtime execution |

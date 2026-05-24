@@ -312,6 +312,8 @@ A manual validation checklist covering `/reload`, command registration, config p
 
 **Step 20.2 status:** The validation checklist for approved, rejected-block, rejected-warn, persistence, follow-up marker, and audit entries has been prepared. Automated validations (typecheck, biome, vitest) passed with 0 errors. Manual runtime execution is pending — the checklist is ready for execution inside the Pi Runtime.
 
+**Step 20.3 status:** The validation checklist for correction cycles, Git context (valid repo, non-Git, large diff truncation), missing reviewer model, operational failures (optional), invalid JSON (optional), persistence, and final failure has been prepared. Automated validations (typecheck, biome, vitest) passed with 0 errors. Manual runtime execution is pending — the checklist is ready for execution inside the Pi Runtime.
+
 ## Manual smoke test
 
 1. Install dependencies: `pnpm install`.

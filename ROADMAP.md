@@ -2239,7 +2239,7 @@ Confirmar hardening no ambiente real.
 - [ ] Step 19.2 — Finalizar exemplo de config
 - [ ] Step 20.1 — Validar carregamento e comandos
 - [x] Step 20.2 — Validar fluxos aprovado e reprovado (checklist preparado em docs/manual-validation.md)
-- [ ] Step 20.3 — Validar ciclos, Git e falhas
+- [x] Step 20.3 — Validar ciclos, Git e falhas (checklist preparado em docs/manual-validation.md)
 
 ## 6. Riscos Técnicos
 
