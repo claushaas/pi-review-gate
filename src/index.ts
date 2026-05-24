@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { ReviewGateCommandAPI } from "./commands.js";
 import { registerCommands } from "./commands.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, saveConfig } from "./config.js";
 import type { ModelRegistryAPI } from "./model.js";
 import { handleAgentEnd } from "./reviewer.js";
 import { createRuntimeState } from "./state.js";
@@ -27,5 +27,9 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
-  registerCommands({ pi: pi as unknown as ReviewGateCommandAPI });
+  registerCommands({
+    pi: pi as unknown as ReviewGateCommandAPI,
+    loadConfig,
+    saveConfig,
+  });
 }

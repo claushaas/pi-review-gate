@@ -1942,7 +1942,9 @@ describe("registerCommands", () => {
       sendUserMessage: vi.fn(),
       exec: vi.fn(),
     };
-    registerCommands({ pi });
+    const loadConfig = vi.fn(async () => defaultConfig);
+    const saveConfig = vi.fn();
+    registerCommands({ pi, loadConfig, saveConfig });
 
     expect(pi.registerCommand).toHaveBeenCalledTimes(5);
 
@@ -1967,13 +1969,16 @@ describe("registerCommands", () => {
     expect(pi.appendEntry).not.toHaveBeenCalled();
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
     expect(pi.exec).not.toHaveBeenCalled();
+    // loadConfig/saveConfig are injected but not invoked by registration
+    expect(loadConfig).not.toHaveBeenCalled();
+    expect(saveConfig).not.toHaveBeenCalled();
   });
 
   it("registers commands using command fallback", () => {
     const pi = {
       command: vi.fn(),
     };
-    registerCommands({ pi });
+    registerCommands({ pi, loadConfig: vi.fn(), saveConfig: vi.fn() });
 
     expect(pi.command).toHaveBeenCalledTimes(5);
     expect(pi.command.mock.calls[0][0]).toBe(COMMAND_REVIEW_GATE);
@@ -1985,7 +1990,7 @@ describe("registerCommands", () => {
         register: vi.fn(),
       },
     };
-    registerCommands({ pi });
+    registerCommands({ pi, loadConfig: vi.fn(), saveConfig: vi.fn() });
 
     expect(pi.commands.register).toHaveBeenCalledTimes(5);
     expect(pi.commands.register.mock.calls[0][0]).toBe(COMMAND_REVIEW_GATE);
@@ -1995,15 +2000,17 @@ describe("registerCommands", () => {
     expect(() =>
       registerCommands({
         pi: {},
+        loadConfig: vi.fn(),
+        saveConfig: vi.fn(),
       }),
     ).toThrow("Pi command registration API is not available.");
   });
 
-  it("uses placeholder handlers for this step", async () => {
+  it("uses placeholder handlers for /review-gate and /review-gate-model", async () => {
     const pi = {
       registerCommand: vi.fn(),
     };
-    registerCommands({ pi });
+    registerCommands({ pi, loadConfig: vi.fn(), saveConfig: vi.fn() });
 
     const handlersByCommand = new Map(
       pi.registerCommand.mock.calls.map(([name, options]) => [name, options.handler]),
@@ -2014,20 +2021,8 @@ describe("registerCommands", () => {
     );
 
     await expect(
-      Promise.resolve(handlersByCommand.get(COMMAND_REVIEW_GATE_STATUS)?.()),
-    ).resolves.toBe("Review gate status command is not implemented yet.");
-
-    await expect(
       Promise.resolve(handlersByCommand.get(COMMAND_REVIEW_GATE_MODEL)?.()),
     ).resolves.toBe("Review gate model command is not implemented yet.");
-
-    await expect(Promise.resolve(handlersByCommand.get(COMMAND_REVIEW_GATE_ON)?.())).resolves.toBe(
-      "Review gate on command is not implemented yet.",
-    );
-
-    await expect(Promise.resolve(handlersByCommand.get(COMMAND_REVIEW_GATE_OFF)?.())).resolves.toBe(
-      "Review gate off command is not implemented yet.",
-    );
   });
 });
 
@@ -2070,6 +2065,406 @@ describe("extension entrypoint command registration", () => {
     // appendEntry should not be called (no review triggering)
     expect(pi.appendEntry).not.toHaveBeenCalled();
     // sendUserMessage should not be called
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Helper utilities for command tests (Step 16.2)
+// ---------------------------------------------------------------------------
+
+function getHandlers(registerCommand: ReturnType<typeof vi.fn>): Map<string, () => unknown> {
+  return new Map(registerCommand.mock.calls.map(([name, options]) => [name, options.handler]));
+}
+
+async function runHandler(handler: (() => unknown) | undefined): Promise<unknown> {
+  if (!handler) {
+    throw new Error("Missing command handler.");
+  }
+  return await Promise.resolve(handler());
+}
+
+// ---------------------------------------------------------------------------
+// Step 16.2 — /review-gate-status
+// ---------------------------------------------------------------------------
+
+describe("review gate status command", () => {
+  it("shows review gate status with no configured model", async () => {
+    const loadConfig = vi.fn(async () => ({
+      ...defaultConfig,
+      enabled: true,
+      mode: "block" as const,
+      reviewerModel: null,
+    }));
+    const saveConfig = vi.fn();
+    const pi = {
+      registerCommand: vi.fn(),
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(),
+    };
+    registerCommands({
+      pi,
+      loadConfig,
+      saveConfig,
+    });
+    const handlers = getHandlers(pi.registerCommand);
+    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    expect(loadConfig).toHaveBeenCalledTimes(1);
+    expect(saveConfig).not.toHaveBeenCalled();
+    expect(output).toContain("# Review Gate Status");
+    expect(output).toContain("Enabled: true");
+    expect(output).toContain("Mode: block");
+    expect(output).toContain("Reviewer model: [not configured]");
+    expect(output).toContain("Max correction cycles:");
+    expect(output).toContain("## Context");
+    expect(output).toContain("## Git");
+    expect(output).toContain("## Reviewer");
+    expect(pi.exec).not.toHaveBeenCalled();
+    expect(pi.appendEntry).not.toHaveBeenCalled();
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("shows configured reviewer model in status", async () => {
+    const loadConfig = vi.fn(async () => ({
+      ...defaultConfig,
+      reviewerModel: {
+        provider: "test-provider",
+        id: "test-model",
+      },
+    }));
+    const saveConfig = vi.fn();
+    const pi = {
+      registerCommand: vi.fn(),
+    };
+    registerCommands({
+      pi,
+      loadConfig,
+      saveConfig,
+    });
+    const handlers = getHandlers(pi.registerCommand);
+    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    expect(output).toContain("Reviewer model: test-provider/test-model");
+  });
+
+  it("shows configured reviewer model and thinking level in status", async () => {
+    const loadConfig = vi.fn(async () => ({
+      ...defaultConfig,
+      reviewerModel: {
+        provider: "test-provider",
+        id: "test-model",
+        thinkingLevel: "high" as const,
+      },
+    }));
+    const saveConfig = vi.fn();
+    const pi = {
+      registerCommand: vi.fn(),
+    };
+    registerCommands({
+      pi,
+      loadConfig,
+      saveConfig,
+    });
+    const handlers = getHandlers(pi.registerCommand);
+    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    expect(output).toContain("Reviewer model: test-provider/test-model (thinking: high)");
+  });
+
+  it("shows disabled status correctly", async () => {
+    const loadConfig = vi.fn(async () => ({
+      ...defaultConfig,
+      enabled: false,
+      mode: "warn" as const,
+    }));
+    const saveConfig = vi.fn();
+    const pi = {
+      registerCommand: vi.fn(),
+    };
+    registerCommands({
+      pi,
+      loadConfig,
+      saveConfig,
+    });
+    const handlers = getHandlers(pi.registerCommand);
+    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    expect(output).toContain("Enabled: false");
+    expect(output).toContain("Mode: warn");
+  });
+
+  it("does not call saveConfig", async () => {
+    const loadConfig = vi.fn(async () => defaultConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    registerCommands({ pi, loadConfig, saveConfig });
+    const handlers = getHandlers(pi.registerCommand);
+    await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    expect(saveConfig).not.toHaveBeenCalled();
+  });
+
+  it("does not call exec, appendEntry, or sendUserMessage", async () => {
+    const loadConfig = vi.fn(async () => defaultConfig);
+    const saveConfig = vi.fn();
+    const pi = {
+      registerCommand: vi.fn(),
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(),
+    };
+    registerCommands({ pi, loadConfig, saveConfig });
+    const handlers = getHandlers(pi.registerCommand);
+    await runHandler(handlers.get(COMMAND_REVIEW_GATE_STATUS));
+    expect(pi.exec).not.toHaveBeenCalled();
+    expect(pi.appendEntry).not.toHaveBeenCalled();
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 16.2 — /review-gate-on
+// ---------------------------------------------------------------------------
+
+describe("review gate on command", () => {
+  it("enables the review gate and preserves the rest of the config", async () => {
+    const currentConfig: ReviewGateConfig = {
+      ...defaultConfig,
+      enabled: false,
+      mode: "warn",
+      reviewerModel: {
+        provider: "test-provider",
+        id: "test-model",
+      },
+    };
+    const loadConfig = vi.fn(async () => currentConfig);
+    const saveConfig = vi.fn();
+    const pi = {
+      registerCommand: vi.fn(),
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(),
+    };
+    registerCommands({
+      pi,
+      loadConfig,
+      saveConfig,
+    });
+    const handlers = getHandlers(pi.registerCommand);
+    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
+    expect(output).toBe("Review gate enabled.");
+    expect(loadConfig).toHaveBeenCalledTimes(1);
+    expect(saveConfig).toHaveBeenCalledTimes(1);
+    expect(saveConfig).toHaveBeenCalledWith({
+      ...currentConfig,
+      enabled: true,
+    });
+    expect(pi.exec).not.toHaveBeenCalled();
+    expect(pi.appendEntry).not.toHaveBeenCalled();
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("preserves non-enabled fields when enabling", async () => {
+    const currentConfig: ReviewGateConfig = {
+      ...defaultConfig,
+      enabled: false,
+      mode: "block",
+      maxCorrectionCycles: 5,
+      reviewerModel: {
+        provider: "openrouter",
+        id: "deepseek/deepseek-v3.2",
+        thinkingLevel: "high",
+      },
+      context: {
+        ...defaultConfig.context,
+        includeEventMessages: false,
+        maxSessionEntries: 20,
+      },
+      git: {
+        ...defaultConfig.git,
+        enabled: false,
+      },
+      reviewer: {
+        ...defaultConfig.reviewer,
+        requireJson: false,
+        timeoutMs: 30000,
+      },
+      ui: {
+        ...defaultConfig.ui,
+        notifyOnPass: false,
+        notifyOnFail: false,
+        showReviewerSummary: false,
+      },
+    };
+    const loadConfig = vi.fn(async () => currentConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    registerCommands({ pi, loadConfig, saveConfig });
+    const handlers = getHandlers(pi.registerCommand);
+    await runHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
+    expect(saveConfig).toHaveBeenCalledWith({
+      ...currentConfig,
+      enabled: true,
+    });
+  });
+
+  it("calls loadConfig before saveConfig", async () => {
+    const loadCallOrder: string[] = [];
+    const loadConfig = vi.fn(async () => {
+      loadCallOrder.push("load");
+      return defaultConfig;
+    });
+    const saveConfig = vi.fn(async () => {
+      loadCallOrder.push("save");
+    });
+    const pi = { registerCommand: vi.fn() };
+    registerCommands({ pi, loadConfig, saveConfig });
+    const handlers = getHandlers(pi.registerCommand);
+    await runHandler(handlers.get(COMMAND_REVIEW_GATE_ON));
+    expect(loadCallOrder).toEqual(["load", "save"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 16.2 — /review-gate-off
+// ---------------------------------------------------------------------------
+
+describe("review gate off command", () => {
+  it("disables the review gate and preserves the rest of the config", async () => {
+    const currentConfig: ReviewGateConfig = {
+      ...defaultConfig,
+      enabled: true,
+      mode: "block",
+      maxCorrectionCycles: 5,
+    };
+    const loadConfig = vi.fn(async () => currentConfig);
+    const saveConfig = vi.fn();
+    const pi = {
+      registerCommand: vi.fn(),
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(),
+    };
+    registerCommands({
+      pi,
+      loadConfig,
+      saveConfig,
+    });
+    const handlers = getHandlers(pi.registerCommand);
+    const output = await runHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
+    expect(output).toBe("Review gate disabled.");
+    expect(saveConfig).toHaveBeenCalledWith({
+      ...currentConfig,
+      enabled: false,
+    });
+    expect(pi.exec).not.toHaveBeenCalled();
+    expect(pi.appendEntry).not.toHaveBeenCalled();
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("preserves non-enabled fields when disabling", async () => {
+    const currentConfig: ReviewGateConfig = {
+      ...defaultConfig,
+      enabled: true,
+      reviewerModel: {
+        provider: "test-provider",
+        id: "test-model",
+        thinkingLevel: "low" as const,
+      },
+    };
+    const loadConfig = vi.fn(async () => currentConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    registerCommands({ pi, loadConfig, saveConfig });
+    const handlers = getHandlers(pi.registerCommand);
+    await runHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
+    expect(saveConfig).toHaveBeenCalledWith({
+      ...currentConfig,
+      enabled: false,
+    });
+  });
+
+  it("calls loadConfig and saveConfig exactly once each", async () => {
+    const loadConfig = vi.fn(async () => defaultConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    registerCommands({ pi, loadConfig, saveConfig });
+    const handlers = getHandlers(pi.registerCommand);
+    await runHandler(handlers.get(COMMAND_REVIEW_GATE_OFF));
+    expect(loadConfig).toHaveBeenCalledTimes(1);
+    expect(saveConfig).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 16.2 — Placeholder preservation
+// ---------------------------------------------------------------------------
+
+describe("placeholder commands preservation", () => {
+  it("/review-gate returns placeholder", async () => {
+    const loadConfig = vi.fn(async () => defaultConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    registerCommands({ pi, loadConfig, saveConfig });
+    const handlers = getHandlers(pi.registerCommand);
+    await expect(runHandler(handlers.get(COMMAND_REVIEW_GATE))).resolves.toBe(
+      "Review gate menu is not implemented yet.",
+    );
+  });
+
+  it("/review-gate-model returns placeholder", async () => {
+    const loadConfig = vi.fn(async () => defaultConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    registerCommands({ pi, loadConfig, saveConfig });
+    const handlers = getHandlers(pi.registerCommand);
+    await expect(runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL))).resolves.toBe(
+      "Review gate model command is not implemented yet.",
+    );
+  });
+
+  it("/review-gate-model does not call loadConfig or saveConfig", async () => {
+    const loadConfig = vi.fn(async () => defaultConfig);
+    const saveConfig = vi.fn();
+    const pi = { registerCommand: vi.fn() };
+    registerCommands({ pi, loadConfig, saveConfig });
+    const handlers = getHandlers(pi.registerCommand);
+    await runHandler(handlers.get(COMMAND_REVIEW_GATE_MODEL));
+    expect(loadConfig).not.toHaveBeenCalled();
+    expect(saveConfig).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 16.2 — Entrypoint injection
+// ---------------------------------------------------------------------------
+
+describe("extension entrypoint injection", () => {
+  it("injects loadConfig and saveConfig into registerCommands", async () => {
+    const pi = {
+      registerCommand: vi.fn(),
+      on: vi.fn(),
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(),
+    };
+
+    await extensionFactory(pi as unknown as Parameters<typeof extensionFactory>[0]);
+
+    expect(pi.registerCommand).toHaveBeenCalledTimes(5);
+    expect(pi.on).toHaveBeenCalledWith("agent_end", expect.any(Function));
+  });
+
+  it("does not call Git, model, appendEntry, or sendUserMessage during initialization", async () => {
+    const pi = {
+      registerCommand: vi.fn(),
+      on: vi.fn(),
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(),
+    };
+
+    await extensionFactory(pi as unknown as Parameters<typeof extensionFactory>[0]);
+
+    expect(pi.exec).not.toHaveBeenCalled();
+    expect(pi.appendEntry).not.toHaveBeenCalled();
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
   });
 });

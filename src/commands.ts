@@ -5,6 +5,7 @@ import {
   COMMAND_REVIEW_GATE_ON,
   COMMAND_REVIEW_GATE_STATUS,
 } from "./constants.js";
+import type { ReviewGateConfig } from "./types.js";
 
 type CommandHandler = () => Promise<string | undefined> | string | undefined;
 
@@ -63,8 +64,50 @@ function registerCommand(pi: ReviewGateCommandAPI, definition: CommandDefinition
   throw new Error("Pi command registration API is not available.");
 }
 
-export function registerCommands(params: { pi: ReviewGateCommandAPI }): void {
-  const { pi } = params;
+function createEnabledConfig(config: ReviewGateConfig, enabled: boolean): ReviewGateConfig {
+  return {
+    ...config,
+    enabled,
+  };
+}
+
+function formatReviewerModel(config: ReviewGateConfig): string {
+  if (config.reviewerModel === null) {
+    return "[not configured]";
+  }
+  const base = `${config.reviewerModel.provider}/${config.reviewerModel.id}`;
+  return config.reviewerModel.thinkingLevel
+    ? `${base} (thinking: ${config.reviewerModel.thinkingLevel})`
+    : base;
+}
+
+function formatReviewGateStatus(config: ReviewGateConfig): string {
+  return `# Review Gate Status
+Enabled: ${config.enabled}
+Mode: ${config.mode}
+Reviewer model: ${formatReviewerModel(config)}
+Max correction cycles: ${config.maxCorrectionCycles}
+## Context
+Include event messages: ${config.context.includeEventMessages}
+Include session slice: ${config.context.includeSessionSlice}
+Max session entries: ${config.context.maxSessionEntries}
+## Git
+Enabled: ${config.git.enabled}
+Include status: ${config.git.includeStatus}
+Include diff stat: ${config.git.includeDiffStat}
+Include diff: ${config.git.includeDiff}
+## Reviewer
+Timeout ms: ${config.reviewer.timeoutMs}
+Require JSON: ${config.reviewer.requireJson}
+Fail closed on invalid JSON: ${config.reviewer.failClosedOnInvalidJson}`;
+}
+
+export function registerCommands(params: {
+  pi: ReviewGateCommandAPI;
+  loadConfig: () => Promise<ReviewGateConfig>;
+  saveConfig: (config: ReviewGateConfig) => Promise<void>;
+}): void {
+  const { pi, loadConfig, saveConfig } = params;
 
   const commands: CommandDefinition[] = [
     {
@@ -75,7 +118,10 @@ export function registerCommands(params: { pi: ReviewGateCommandAPI }): void {
     {
       name: COMMAND_REVIEW_GATE_STATUS,
       description: "Show review gate status.",
-      handler: () => "Review gate status command is not implemented yet.",
+      handler: async () => {
+        const config = await loadConfig();
+        return formatReviewGateStatus(config);
+      },
     },
     {
       name: COMMAND_REVIEW_GATE_MODEL,
@@ -85,12 +131,22 @@ export function registerCommands(params: { pi: ReviewGateCommandAPI }): void {
     {
       name: COMMAND_REVIEW_GATE_ON,
       description: "Enable review gate.",
-      handler: () => "Review gate on command is not implemented yet.",
+      handler: async () => {
+        const config = await loadConfig();
+        const nextConfig = createEnabledConfig(config, true);
+        await saveConfig(nextConfig);
+        return "Review gate enabled.";
+      },
     },
     {
       name: COMMAND_REVIEW_GATE_OFF,
       description: "Disable review gate.",
-      handler: () => "Review gate off command is not implemented yet.",
+      handler: async () => {
+        const config = await loadConfig();
+        const nextConfig = createEnabledConfig(config, false);
+        await saveConfig(nextConfig);
+        return "Review gate disabled.";
+      },
     },
   ];
 
