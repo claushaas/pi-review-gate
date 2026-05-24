@@ -16,7 +16,7 @@ import {
 import extensionFactory from "../src/index.js";
 import type { ModelRegistryAPI } from "../src/model.js";
 import type { ReviewGateAgentEndAPI } from "../src/reviewer.js";
-import { getWarningMessage, handleAgentEnd } from "../src/reviewer.js";
+import { getWarningMessage, handleAgentEnd, runReviewer } from "../src/reviewer.js";
 import { createRuntimeState } from "../src/state.js";
 import type { ReviewGateConfig, ReviewGateResult, RuntimeState } from "../src/types.js";
 
@@ -2521,6 +2521,598 @@ describe("handleAgentEnd maximum correction cycles", () => {
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
 
     // Active review is released
+    expect(state.activeReview).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 17.3 — Invalid reviewer JSON in complete flow
+// ---------------------------------------------------------------------------
+
+describe("handleAgentEnd invalid reviewer JSON", () => {
+  function createFreshState(): RuntimeState {
+    return createRuntimeState();
+  }
+
+  function createSimplePi() {
+    return {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+  }
+
+  function createInvalidJsonModelRegistry() {
+    return {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete: vi.fn(async () => "{ invalid json }"),
+      })),
+    };
+  }
+
+  function createSchemaInvalidModelRegistry() {
+    return {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete: vi.fn(async () =>
+          JSON.stringify({
+            approved: true,
+            severity: "critical",
+          }),
+        ),
+      })),
+    };
+  }
+
+  // =================================================================
+  // Fail-closed + block: treated as blocking result with follow-up
+  // =================================================================
+
+  it("treats invalid JSON as blocking result in fail-closed block mode", async () => {
+    const state = createFreshState();
+    const pi = createSimplePi();
+    const modelRegistry = createInvalidJsonModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Prompt" }],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "block",
+        maxCorrectionCycles: 2,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+        reviewer: {
+          ...defaultConfig.reviewer,
+          failClosedOnInvalidJson: true,
+        },
+      }),
+      context: { modelRegistry },
+    });
+
+    // Result is persisted as a review result (not an error)
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: false,
+          severity: "blocking",
+          summary: "Reviewer returned an invalid response.",
+          evidence: expect.arrayContaining([expect.stringMatching(/^Invalid reviewer response:/)]),
+        }),
+      }),
+    );
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
+
+    // Follow-up is sent with correction request
+    expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
+    const [message, options] = pi.sendUserMessage.mock.calls[0];
+    expect(message.startsWith(CORRECTION_REQUEST_MARKER)).toBe(true);
+    expect(message).toContain("Reviewer returned an invalid response.");
+    expect(message).toContain(
+      "The reviewer response could not be parsed as a valid ReviewGateResult.",
+    );
+    expect(message).toContain("Invalid reviewer response:");
+    expect(options).toEqual({ deliverAs: "followUp" });
+
+    expect(state.activeReview).toBe(false);
+  });
+
+  it("treats schema-invalid JSON as blocking result in fail-closed block mode", async () => {
+    const state = createFreshState();
+    const pi = createSimplePi();
+    const modelRegistry = createSchemaInvalidModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Prompt" }],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "block",
+        maxCorrectionCycles: 2,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+        reviewer: {
+          ...defaultConfig.reviewer,
+          failClosedOnInvalidJson: true,
+        },
+      }),
+      context: { modelRegistry },
+    });
+
+    // Result is persisted as a review result (not an error)
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: false,
+          severity: "blocking",
+          summary: "Reviewer returned an invalid response.",
+          evidence: expect.arrayContaining([expect.stringMatching(/^Invalid reviewer response:/)]),
+        }),
+      }),
+    );
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
+
+    // Follow-up is sent
+    expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
+    const [message] = pi.sendUserMessage.mock.calls[0];
+    expect(message.startsWith(CORRECTION_REQUEST_MARKER)).toBe(true);
+    expect(message).toContain("Reviewer returned an invalid response.");
+
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =================================================================
+  // Fail-closed + warn: persisted without follow-up
+  // =================================================================
+
+  it("persists invalid JSON result without follow-up in fail-closed warn mode", async () => {
+    const state = createFreshState();
+    const pi = createSimplePi();
+    const modelRegistry = createInvalidJsonModelRegistry();
+    const ui = {
+      notify: vi.fn(),
+    };
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Prompt" }],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "warn",
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+        reviewer: {
+          ...defaultConfig.reviewer,
+          failClosedOnInvalidJson: true,
+        },
+        ui: {
+          ...defaultConfig.ui,
+          notifyOnFail: true,
+        },
+      }),
+      context: { modelRegistry, ui },
+    });
+
+    // Result is persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: false,
+          summary: "Reviewer returned an invalid response.",
+        }),
+      }),
+    );
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
+
+    // No follow-up in warn mode
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // Warning notification when ui notify is available and enabled
+    expect(ui.notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Review gate warning",
+        severity: "warning",
+      }),
+    );
+
+    expect(state.activeReview).toBe(false);
+  });
+
+  it("does not notify warn when notifyOnFail is disabled", async () => {
+    const state = createFreshState();
+    const pi = createSimplePi();
+    const modelRegistry = createInvalidJsonModelRegistry();
+    const ui = {
+      notify: vi.fn(),
+    };
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Prompt" }],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "warn",
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+        reviewer: {
+          ...defaultConfig.reviewer,
+          failClosedOnInvalidJson: true,
+        },
+        ui: {
+          ...defaultConfig.ui,
+          notifyOnFail: false,
+        },
+      }),
+      context: { modelRegistry, ui },
+    });
+
+    // Result is still persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: false,
+        }),
+      }),
+    );
+    // No notification when notifyOnFail is false
+    expect(ui.notify).not.toHaveBeenCalled();
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =================================================================
+  // Fail-open + block: error persisted and propagated
+  // =================================================================
+
+  it("persists error and propagates invalid JSON in fail-open block mode", async () => {
+    const state = createFreshState();
+    const pi = createSimplePi();
+    const modelRegistry = createInvalidJsonModelRegistry();
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...defaultConfig,
+          enabled: true,
+          mode: "block",
+          reviewerModel: {
+            provider: "test-provider",
+            id: "test-model",
+          },
+          reviewer: {
+            ...defaultConfig.reviewer,
+            failClosedOnInvalidJson: false,
+          },
+        }),
+        context: { modelRegistry },
+      }),
+    ).rejects.toThrow("Invalid reviewer response:");
+
+    // Error is persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        error: expect.objectContaining({
+          message: expect.stringContaining("Invalid reviewer response:"),
+        }),
+      }),
+    );
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, expect.anything());
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  it("persists error and propagates schema-invalid JSON in fail-open block mode", async () => {
+    const state = createFreshState();
+    const pi = createSimplePi();
+    const modelRegistry = createSchemaInvalidModelRegistry();
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...defaultConfig,
+          enabled: true,
+          mode: "block",
+          reviewerModel: {
+            provider: "test-provider",
+            id: "test-model",
+          },
+          reviewer: {
+            ...defaultConfig.reviewer,
+            failClosedOnInvalidJson: false,
+          },
+        }),
+        context: { modelRegistry },
+      }),
+    ).rejects.toThrow("Invalid reviewer response:");
+
+    // Error is persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        error: expect.objectContaining({
+          message: expect.stringContaining("Invalid reviewer response:"),
+        }),
+      }),
+    );
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, expect.anything());
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =================================================================
+  // Fail-open + warn: error persisted without throwing
+  // =================================================================
+
+  it("persists error without throwing invalid JSON in fail-open warn mode", async () => {
+    const state = createFreshState();
+    const pi = createSimplePi();
+    const modelRegistry = createInvalidJsonModelRegistry();
+    const ui = {
+      notify: vi.fn(),
+    };
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...defaultConfig,
+          enabled: true,
+          mode: "warn",
+          reviewerModel: {
+            provider: "test-provider",
+            id: "test-model",
+          },
+          reviewer: {
+            ...defaultConfig.reviewer,
+            failClosedOnInvalidJson: false,
+          },
+        }),
+        context: { modelRegistry, ui },
+      }),
+    ).resolves.toBeUndefined();
+
+    // Error is persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        error: expect.objectContaining({
+          message: expect.stringContaining("Invalid reviewer response:"),
+        }),
+      }),
+    );
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, expect.anything());
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // Notification in warn mode uses severity "warning"
+    expect(ui.notify).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: "Review gate failed",
+        severity: "warning",
+      }),
+    );
+    expect(state.activeReview).toBe(false);
+  });
+
+  it("does not break when ui notify is absent in fail-open warn mode", async () => {
+    const state = createFreshState();
+    const pi = createSimplePi();
+    const modelRegistry = createInvalidJsonModelRegistry();
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...defaultConfig,
+          enabled: true,
+          mode: "warn",
+          reviewerModel: {
+            provider: "test-provider",
+            id: "test-model",
+          },
+          reviewer: {
+            ...defaultConfig.reviewer,
+            failClosedOnInvalidJson: false,
+          },
+        }),
+        context: { modelRegistry },
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =================================================================
+  // Fail-closed + block: cycle limit reached
+  // =================================================================
+
+  it("creates final failure for fail-closed invalid JSON when block cycle limit is reached", async () => {
+    const state = createFreshState();
+    state.correctionCycle = 2;
+    const pi = createSimplePi();
+    const modelRegistry = createInvalidJsonModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [
+          {
+            role: "user",
+            content: `${CORRECTION_REQUEST_MARKER}\n# Mandatory Review Corrections\nPlease fix.`,
+          },
+        ],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "block",
+        maxCorrectionCycles: 2,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+        reviewer: {
+          ...defaultConfig.reviewer,
+          failClosedOnInvalidJson: true,
+        },
+      }),
+      context: { modelRegistry },
+    });
+
+    // Result is persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: false,
+        }),
+      }),
+    );
+
+    // Final failure is persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_FINAL_FAILURE,
+      expect.objectContaining({
+        reason: "Maximum correction cycles exceeded.",
+        result: expect.objectContaining({
+          approved: false,
+          summary: "Reviewer returned an invalid response.",
+        }),
+      }),
+    );
+
+    // No error entry, no follow-up
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  // =================================================================
+  // Safety: invalid JSON never becomes approved
+  // =================================================================
+
+  it("never returns approved for invalid JSON regardless of fail-closed policy", async () => {
+    // Verify runReviewer-level behavior: invalid JSON never approves
+    const modelClient = {
+      complete: vi.fn(async () => "{ invalid json }"),
+    };
+
+    const failClosedResult = await runReviewer({
+      config: {
+        ...defaultConfig,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+        reviewer: {
+          ...defaultConfig.reviewer,
+          failClosedOnInvalidJson: true,
+        },
+      },
+      reviewContext: {
+        currentUserPrompt: "test",
+        serializedEventMessages: "",
+        latestAssistantResponse: null,
+        serializedSessionSlice: null,
+        gitStatus: null,
+        gitDiffStat: null,
+        gitDiff: null,
+      },
+      modelClient,
+    });
+
+    expect(failClosedResult.approved).toBe(false);
+  });
+
+  it("activeReview is released even when result persistence fails in fail-closed mode", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(async () => {
+        throw new Error("append failed");
+      }),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const modelRegistry = createInvalidJsonModelRegistry();
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...defaultConfig,
+          enabled: true,
+          mode: "block",
+          maxCorrectionCycles: 2,
+          reviewerModel: {
+            provider: "test-provider",
+            id: "test-model",
+          },
+          reviewer: {
+            ...defaultConfig.reviewer,
+            failClosedOnInvalidJson: true,
+          },
+        }),
+        context: { modelRegistry },
+      }),
+    ).rejects.toThrow("append failed");
+
     expect(state.activeReview).toBe(false);
   });
 });
