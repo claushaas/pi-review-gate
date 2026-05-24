@@ -266,6 +266,76 @@ describe("example config", () => {
     expect(validateConfig(parsed)).toEqual(defaultConfig);
   });
 
+  it("has reviewerModel explicitly null", () => {
+    const raw = readFileSync(EXAMPLE_CONFIG_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    const config = validateConfig(parsed);
+    expect(config.reviewerModel).toBeNull();
+  });
+
+  it("has all required top-level fields", () => {
+    const raw = readFileSync(EXAMPLE_CONFIG_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    const config = validateConfig(parsed);
+    expect(config).toEqual(
+      expect.objectContaining({
+        enabled: expect.any(Boolean),
+        mode: expect.any(String),
+        reviewerModel: expect.any(Object) as unknown,
+        maxCorrectionCycles: expect.any(Number),
+        context: expect.any(Object),
+        git: expect.any(Object),
+        reviewer: expect.any(Object),
+        ui: expect.any(Object),
+      }),
+    );
+  });
+
+  it("has all required nested fields", () => {
+    const raw = readFileSync(EXAMPLE_CONFIG_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    const config = validateConfig(parsed);
+    expect(config.context).toEqual(
+      expect.objectContaining({
+        strategy: expect.any(String),
+        includeEventMessages: expect.any(Boolean),
+        includeSessionSlice: expect.any(Boolean),
+        maxSessionEntries: expect.any(Number),
+      }),
+    );
+    expect(config.git).toEqual(
+      expect.objectContaining({
+        enabled: expect.any(Boolean),
+        includeStatus: expect.any(Boolean),
+        includeDiffStat: expect.any(Boolean),
+        includeDiff: expect.any(Boolean),
+        maxDiffChars: expect.any(Number),
+        maxStatusChars: expect.any(Number),
+        maxDiffStatChars: expect.any(Number),
+      }),
+    );
+    expect(config.reviewer).toEqual(
+      expect.objectContaining({
+        requireJson: expect.any(Boolean),
+        failClosedOnInvalidJson: expect.any(Boolean),
+        timeoutMs: expect.any(Number),
+      }),
+    );
+    expect(config.ui).toEqual(
+      expect.objectContaining({
+        notifyOnPass: expect.any(Boolean),
+        notifyOnFail: expect.any(Boolean),
+        showReviewerSummary: expect.any(Boolean),
+      }),
+    );
+  });
+
+  it("is compatible with mergeConfig (loadConfig pattern)", () => {
+    const raw = readFileSync(EXAMPLE_CONFIG_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    expect(validateConfig(mergeConfig(parsed))).toEqual(defaultConfig);
+  });
+
   it("does not contain secrets or credentials", () => {
     const raw = readFileSync(EXAMPLE_CONFIG_PATH, "utf8");
     const lower = raw.toLowerCase();

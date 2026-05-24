@@ -113,6 +113,8 @@ The configuration file is stored at:
 }
 ```
 
+A complete reference example is available at `examples/config.example.json`.
+
 The `reviewerModel` must be configured for review to run. When `reviewerModel` is `null`, reviews are skipped and a skip entry is persisted.
 
 ## Commands
