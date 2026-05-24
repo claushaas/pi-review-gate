@@ -13,6 +13,7 @@ export default function (pi: ExtensionAPI) {
       pi: {
         appendEntry: pi.appendEntry.bind(pi),
         exec: pi.exec.bind(pi),
+        sendUserMessage: pi.sendUserMessage?.bind(pi),
       },
       state,
       event,

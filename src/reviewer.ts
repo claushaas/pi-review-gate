@@ -4,6 +4,7 @@ import {
   CUSTOM_ENTRY_REVIEW_SKIPPED,
 } from "./constants.js";
 import { buildReviewContext, extractCurrentUserPrompt } from "./context.js";
+import { buildCorrectionFollowUp } from "./follow-up.js";
 import { collectGitContext } from "./git.js";
 import type { ModelClient, ModelRegistryAPI } from "./model.js";
 import { createModelClientFromContext } from "./model.js";
@@ -98,6 +99,7 @@ type ReviewGateAgentEndAPI = {
     args: string[],
     options?: { timeout?: number; signal?: AbortSignal },
   ): Promise<{ stdout?: string; stderr?: string; code?: number | null; killed?: boolean }>;
+  sendUserMessage?(message: string, options?: { deliverAs?: "followUp" }): Promise<void> | void;
 };
 
 export type { ReviewGateAgentEndAPI };
@@ -465,8 +467,23 @@ export async function handleAgentEnd(params: {
       model: config.reviewerModel,
     });
 
-    // 7. Approved: return without follow-up
-    // 8. Rejected (this step): persist only, no follow-up yet
+    // 7. Approved: return without follow-up (nothing more to do)
+
+    // 8. Rejected in block mode: send mandatory follow-up when cycles remain
+    if (!result.approved && config.mode === "block") {
+      if (state.correctionCycle < config.maxCorrectionCycles) {
+        if (!pi.sendUserMessage) {
+          throw new Error("Pi sendUserMessage API is not available.");
+        }
+        const followUp = buildCorrectionFollowUp(result);
+        await pi.sendUserMessage(followUp, { deliverAs: "followUp" });
+        return;
+      }
+      // Step 15.5 will persist final failure here.
+      return;
+    }
+
+    // Step 15.4 will handle warn notifications.
     return;
   } finally {
     endReview(state);
