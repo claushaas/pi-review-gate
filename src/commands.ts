@@ -273,6 +273,131 @@ async function handleReviewGateModel(params: {
   return formatReviewerModelSetMessage(parsed.model);
 }
 
+// ---------------------------------------------------------------------------
+// /review-gate menu helpers
+// ---------------------------------------------------------------------------
+
+function formatReviewGateMenu(config: ReviewGateConfig): string {
+  const enabledStatus = config.enabled ? "enabled" : "disabled";
+  const gitDiffStatus = config.git.includeDiff ? "enabled" : "disabled";
+  const sessionContextStatus = config.context.includeSessionSlice ? "enabled" : "disabled";
+
+  return `# Review Gate
+Status: ${enabledStatus}
+Mode: ${config.mode}
+Reviewer model: ${formatReviewerModel(config)}
+Max correction cycles: ${config.maxCorrectionCycles}
+Git diff: ${gitDiffStatus}
+Session context: ${sessionContextStatus}
+## Commands
+/review-gate status
+/review-gate on
+/review-gate off
+/review-gate model
+/review-gate model <provider>/<id> [thinkingLevel]
+/review-gate thinking <thinkingLevel>
+/review-gate max-cycles <number>
+/review-gate toggle-git-diff
+/review-gate toggle-session-context
+/review-gate manual
+Direct commands are also available:
+/review-gate-status
+/review-gate-on
+/review-gate-off
+/review-gate-model`;
+}
+
+function parseReviewGateMenuInput(text: string): { command: string; args: string } {
+  const trimmed = text.trim();
+  const firstSpace = trimmed.indexOf(" ");
+  if (firstSpace === -1) {
+    return { command: trimmed, args: "" };
+  }
+  return {
+    command: trimmed.slice(0, firstSpace),
+    args: trimmed.slice(firstSpace + 1).trim(),
+  };
+}
+
+function isPositiveIntegerText(value: string): boolean {
+  if (value.length === 0) {
+    return false;
+  }
+  const num = Number(value);
+  return Number.isFinite(num) && Number.isInteger(num) && num >= 1 && String(num) === value;
+}
+
+async function handleReviewGateThinking(
+  thinkingLevelRaw: string,
+  loadConfig: () => Promise<ReviewGateConfig>,
+  saveConfig: (config: ReviewGateConfig) => Promise<void>,
+): Promise<string> {
+  if (!isThinkingLevel(thinkingLevelRaw)) {
+    return "Invalid thinking level. Expected one of: off, minimal, low, medium, high, xhigh.";
+  }
+  const config = await loadConfig();
+  if (config.reviewerModel === null) {
+    return "Reviewer model is not configured.";
+  }
+  await saveConfig({
+    ...config,
+    reviewerModel: {
+      ...config.reviewerModel,
+      thinkingLevel: thinkingLevelRaw,
+    },
+  });
+  return `Reviewer thinking level set to ${thinkingLevelRaw}.`;
+}
+
+async function handleReviewGateMaxCycles(
+  value: string,
+  loadConfig: () => Promise<ReviewGateConfig>,
+  saveConfig: (config: ReviewGateConfig) => Promise<void>,
+): Promise<string> {
+  if (!isPositiveIntegerText(value)) {
+    return "Invalid max correction cycles. Expected a positive integer.";
+  }
+  const num = Number(value);
+  const config = await loadConfig();
+  await saveConfig({
+    ...config,
+    maxCorrectionCycles: num,
+  });
+  return `Max correction cycles set to ${num}.`;
+}
+
+async function handleReviewGateToggleGitDiff(
+  loadConfig: () => Promise<ReviewGateConfig>,
+  saveConfig: (config: ReviewGateConfig) => Promise<void>,
+): Promise<string> {
+  const config = await loadConfig();
+  const newValue = !config.git.includeDiff;
+  await saveConfig({
+    ...config,
+    git: {
+      ...config.git,
+      includeDiff: newValue,
+    },
+  });
+  return newValue ? "Git diff collection enabled." : "Git diff collection disabled.";
+}
+
+async function handleReviewGateToggleSessionContext(
+  loadConfig: () => Promise<ReviewGateConfig>,
+  saveConfig: (config: ReviewGateConfig) => Promise<void>,
+): Promise<string> {
+  const config = await loadConfig();
+  const newValue = !config.context.includeSessionSlice;
+  await saveConfig({
+    ...config,
+    context: {
+      ...config.context,
+      includeSessionSlice: newValue,
+    },
+  });
+  return newValue ? "Session context enabled." : "Session context disabled.";
+}
+
 export function registerCommands(params: {
   pi: ReviewGateCommandAPI;
   loadConfig: () => Promise<ReviewGateConfig>;
@@ -285,7 +410,55 @@ export function registerCommands(params: {
     {
       name: COMMAND_REVIEW_GATE,
       description: "Open review gate menu.",
-      handler: () => "Review gate menu is not implemented yet.",
+      handler: async (input?: unknown) => {
+        const text = extractCommandText(input);
+        if (text.length === 0) {
+          const config = await loadConfig();
+          return formatReviewGateMenu(config);
+        }
+        const { command, args } = parseReviewGateMenuInput(text);
+
+        if (command === "status") {
+          const config = await loadConfig();
+          return formatReviewGateStatus(config);
+        }
+        if (command === "on") {
+          const config = await loadConfig();
+          const nextConfig = createEnabledConfig(config, true);
+          await saveConfig(nextConfig);
+          return "Review gate enabled.";
+        }
+        if (command === "off") {
+          const config = await loadConfig();
+          const nextConfig = createEnabledConfig(config, false);
+          await saveConfig(nextConfig);
+          return "Review gate disabled.";
+        }
+        if (command === "model") {
+          return await handleReviewGateModel({
+            loadConfig,
+            saveConfig,
+            context,
+            input: args || undefined,
+          });
+        }
+        if (command === "thinking") {
+          return await handleReviewGateThinking(args, loadConfig, saveConfig);
+        }
+        if (command === "max-cycles") {
+          return await handleReviewGateMaxCycles(args, loadConfig, saveConfig);
+        }
+        if (command === "toggle-git-diff") {
+          return await handleReviewGateToggleGitDiff(loadConfig, saveConfig);
+        }
+        if (command === "toggle-session-context") {
+          return await handleReviewGateToggleSessionContext(loadConfig, saveConfig);
+        }
+        if (command === "manual") {
+          return "Manual review is not implemented yet.";
+        }
+        return "Unknown review gate command. Run /review-gate to see available commands.";
+      },
     },
     {
       name: COMMAND_REVIEW_GATE_STATUS,
