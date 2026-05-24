@@ -9,7 +9,11 @@ import { createRuntimeState } from "./state.js";
 export default function (pi: ExtensionAPI) {
   const state = createRuntimeState();
 
+  // Captured from agent_end ctx — modelRegistry is not on ExtensionAPI directly.
+  let capturedModelRegistry: ModelRegistryAPI | undefined;
+
   pi.on("agent_end", async (event, ctx) => {
+    capturedModelRegistry = ctx.modelRegistry as unknown as ModelRegistryAPI | undefined;
     await handleAgentEnd({
       pi: {
         appendEntry: pi.appendEntry.bind(pi),
@@ -21,8 +25,7 @@ export default function (pi: ExtensionAPI) {
       loadConfig,
       context: {
         sessionManager: ctx.sessionManager,
-        // bridge: Pi ModelRegistry → local ModelRegistryAPI
-        modelRegistry: ctx.modelRegistry as unknown as ModelRegistryAPI,
+        modelRegistry: capturedModelRegistry,
       },
     });
   });
@@ -31,5 +34,10 @@ export default function (pi: ExtensionAPI) {
     pi: pi as unknown as ReviewGateCommandAPI,
     loadConfig,
     saveConfig,
+    context: {
+      get modelRegistry() {
+        return capturedModelRegistry;
+      },
+    },
   });
 }

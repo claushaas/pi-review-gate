@@ -5,9 +5,14 @@ import {
   COMMAND_REVIEW_GATE_ON,
   COMMAND_REVIEW_GATE_STATUS,
 } from "./constants.js";
-import type { ReviewGateConfig } from "./types.js";
+import type { ModelRegistryAPI, ModelRegistryCandidate } from "./model.js";
+import type { ReviewerModelConfig, ReviewGateConfig, ThinkingLevel } from "./types.js";
 
-type CommandHandler = () => Promise<string | undefined> | string | undefined;
+type CommandHandler = (input?: unknown) => Promise<string | undefined> | string | undefined;
+
+type ReviewGateCommandContext = {
+  modelRegistry?: ModelRegistryAPI;
+};
 
 type CommandDefinition = {
   name: string;
@@ -102,12 +107,179 @@ Require JSON: ${config.reviewer.requireJson}
 Fail closed on invalid JSON: ${config.reviewer.failClosedOnInvalidJson}`;
 }
 
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+
+function isThinkingLevel(value: string): value is ThinkingLevel {
+  return (THINKING_LEVELS as readonly string[]).includes(value);
+}
+
+function extractCommandText(input: unknown): string {
+  if (typeof input === "string") {
+    return input.trim();
+  }
+  if (typeof input !== "object" || input === null) {
+    return "";
+  }
+  for (const key of ["args", "input", "text", "message", "content"] as const) {
+    if (key in input && typeof (input as Record<string, unknown>)[key] === "string") {
+      return ((input as Record<string, unknown>)[key] as string).trim();
+    }
+  }
+  return "";
+}
+
+type ParseModelResult = { ok: true; model: ReviewerModelConfig } | { ok: false; error: string };
+
+function parseModelSelection(text: string): ParseModelResult {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) {
+    return { ok: false, error: "missing" };
+  }
+  const [modelSpec, thinkingLevelRaw, ...rest] = trimmed.split(/\s+/);
+  if (!modelSpec || rest.length > 0) {
+    return {
+      ok: false,
+      error: "Invalid reviewer model. Use /review-gate-model <provider>/<id> [thinkingLevel].",
+    };
+  }
+  const slashIndex = modelSpec.indexOf("/");
+  if (slashIndex <= 0 || slashIndex === modelSpec.length - 1) {
+    return {
+      ok: false,
+      error: "Invalid reviewer model. Use /review-gate-model <provider>/<id> [thinkingLevel].",
+    };
+  }
+  const provider = modelSpec.slice(0, slashIndex).trim();
+  const id = modelSpec.slice(slashIndex + 1).trim();
+  if (provider.length === 0 || id.length === 0) {
+    return {
+      ok: false,
+      error: "Invalid reviewer model. Use /review-gate-model <provider>/<id> [thinkingLevel].",
+    };
+  }
+  if (thinkingLevelRaw !== undefined && !isThinkingLevel(thinkingLevelRaw)) {
+    return {
+      ok: false,
+      error: "Invalid thinking level. Expected one of: off, minimal, low, medium, high, xhigh.",
+    };
+  }
+  return {
+    ok: true,
+    model: {
+      provider,
+      id,
+      ...(thinkingLevelRaw ? { thinkingLevel: thinkingLevelRaw } : {}),
+    },
+  };
+}
+
+async function findModelCandidate(params: {
+  modelRegistry: ModelRegistryAPI;
+  provider: string;
+  id: string;
+}): Promise<ModelRegistryCandidate | null> {
+  const { modelRegistry, provider, id } = params;
+
+  if (modelRegistry.find) {
+    const candidate = await modelRegistry.find(provider, id);
+    return candidate ?? null;
+  }
+
+  if (!modelRegistry.getModels) {
+    return null;
+  }
+
+  const models = await modelRegistry.getModels();
+  return models.find((candidate) => candidate.provider === provider && candidate.id === id) ?? null;
+}
+
+function formatAvailableModels(models: ModelRegistryCandidate[]): string {
+  return models
+    .map((model, index) => {
+      const label = `${model.provider ?? "?"}/${model.id ?? "?"}`;
+      const suffix = model.name ? ` — ${model.name}` : "";
+      return `${index + 1}. ${label}${suffix}`;
+    })
+    .join("\n");
+}
+
+function formatReviewerModelSetMessage(model: ReviewerModelConfig): string {
+  const base = `Reviewer model set to ${model.provider}/${model.id}`;
+  return model.thinkingLevel ? `${base} (thinking: ${model.thinkingLevel}).` : `${base}.`;
+}
+
+async function listReviewerModels(modelRegistry: ModelRegistryAPI): Promise<string> {
+  if (!modelRegistry.getModels) {
+    return "Model registry does not support listing models.";
+  }
+  const models = await modelRegistry.getModels();
+  if (models.length === 0) {
+    return "No models available in registry.";
+  }
+  const modelsList = formatAvailableModels(models);
+  return `# Available Reviewer Models
+Use:
+/review-gate-model <provider>/<id> [thinkingLevel]
+${modelsList}`;
+}
+
+async function handleReviewGateModel(params: {
+  loadConfig: () => Promise<ReviewGateConfig>;
+  saveConfig: (config: ReviewGateConfig) => Promise<void>;
+  context?: ReviewGateCommandContext;
+  input?: unknown;
+}): Promise<string> {
+  const { loadConfig, saveConfig, context, input } = params;
+  const text = extractCommandText(input);
+
+  if (text.length === 0) {
+    const registry = context?.modelRegistry;
+    if (!registry) {
+      return "Model registry is not available.";
+    }
+    return await listReviewerModels(registry);
+  }
+
+  const parsed = parseModelSelection(text);
+  if (!parsed.ok) {
+    if (parsed.error === "missing") {
+      const registry = context?.modelRegistry;
+      if (!registry) {
+        return "Model registry is not available.";
+      }
+      return await listReviewerModels(registry);
+    }
+    return parsed.error;
+  }
+
+  const registry = context?.modelRegistry;
+  if (registry) {
+    const candidate = await findModelCandidate({
+      modelRegistry: registry,
+      provider: parsed.model.provider,
+      id: parsed.model.id,
+    });
+    const canValidate = Boolean(registry.find || registry.getModels);
+    if (canValidate && candidate === null) {
+      return `Reviewer model not found: ${parsed.model.provider}/${parsed.model.id}`;
+    }
+  }
+
+  const config = await loadConfig();
+  await saveConfig({
+    ...config,
+    reviewerModel: parsed.model,
+  });
+  return formatReviewerModelSetMessage(parsed.model);
+}
+
 export function registerCommands(params: {
   pi: ReviewGateCommandAPI;
   loadConfig: () => Promise<ReviewGateConfig>;
   saveConfig: (config: ReviewGateConfig) => Promise<void>;
+  context?: ReviewGateCommandContext;
 }): void {
-  const { pi, loadConfig, saveConfig } = params;
+  const { pi, loadConfig, saveConfig, context } = params;
 
   const commands: CommandDefinition[] = [
     {
@@ -126,7 +298,14 @@ export function registerCommands(params: {
     {
       name: COMMAND_REVIEW_GATE_MODEL,
       description: "Configure reviewer model.",
-      handler: () => "Review gate model command is not implemented yet.",
+      handler: async (input?: unknown) => {
+        return await handleReviewGateModel({
+          loadConfig,
+          saveConfig,
+          context,
+          input,
+        });
+      },
     },
     {
       name: COMMAND_REVIEW_GATE_ON,
