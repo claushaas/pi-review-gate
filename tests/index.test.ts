@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { defaultConfig } from "../src/config.js";
-import { CUSTOM_ENTRY_REVIEW_SKIPPED } from "../src/constants.js";
+import { CUSTOM_ENTRY_REVIEW_RESULT, CUSTOM_ENTRY_REVIEW_SKIPPED } from "../src/constants.js";
 import extensionFactory from "../src/index.js";
 import type { ReviewGateAgentEndAPI } from "../src/reviewer.js";
 import { handleAgentEnd } from "../src/reviewer.js";
 import { createRuntimeState } from "../src/state.js";
-import type { RuntimeState } from "../src/types.js";
+import type { ReviewGateConfig, RuntimeState } from "../src/types.js";
 
 // ---------------------------------------------------------------------------
 // Entrypoint smoke test (preserved)
@@ -390,6 +390,7 @@ describe("handleAgentEnd early returns", () => {
       appendEntry: vi.fn(async () => {
         throw new Error("append failed");
       }) as ReviewGateAgentEndAPI["appendEntry"],
+      exec: vi.fn(),
     };
 
     await expect(
@@ -414,6 +415,7 @@ describe("handleAgentEnd early returns", () => {
       appendEntry: vi.fn(async () => {
         throw new Error("persistence error");
       }) as ReviewGateAgentEndAPI["appendEntry"],
+      exec: vi.fn(),
     };
 
     await expect(
@@ -490,5 +492,497 @@ describe("handleAgentEnd early returns", () => {
 
     expect(state.activeReview).toBe(true);
     expect(pi.appendEntry).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 15.2 — Approved review orchestration
+// ---------------------------------------------------------------------------
+
+describe("handleAgentEnd approved review orchestration", () => {
+  // -- fixture helpers --
+
+  function createFreshState(): RuntimeState {
+    return createRuntimeState();
+  }
+
+  const configWithReviewerModel: ReviewGateConfig = {
+    ...defaultConfig,
+    enabled: true,
+    reviewerModel: {
+      provider: "test-provider",
+      id: "test-model",
+      thinkingLevel: "high",
+    },
+  };
+
+  function createGitPi() {
+    return {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async (command: string, args: string[]) => {
+        const joinedArgs = args.join(" ");
+        if (command !== "git") {
+          throw new Error(`Unexpected command: ${command}`);
+        }
+        if (joinedArgs === "status --short") {
+          return { stdout: " M src/reviewer.ts\n" };
+        }
+        if (joinedArgs === "diff --stat") {
+          return { stdout: " src/reviewer.ts | 10 ++++++++++\n" };
+        }
+        if (joinedArgs === "diff") {
+          return {
+            stdout: "diff --git a/src/reviewer.ts b/src/reviewer.ts\n",
+          };
+        }
+        throw new Error(`Unexpected git args: ${joinedArgs}`);
+      }),
+    };
+  }
+
+  function createApprovingModelRegistry() {
+    return {
+      find: vi.fn(async (_provider?: string, _id?: string) => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete: vi.fn(async () =>
+          JSON.stringify({
+            approved: true,
+            severity: "pass",
+            summary: "Delivery satisfies the request.",
+            requiredCorrections: [],
+            recommendedCorrections: [],
+            evidence: ["Reviewer approved the delivery."],
+            confidence: "high",
+          }),
+        ),
+      })),
+    };
+  }
+
+  function createRejectingModelRegistry() {
+    return {
+      find: vi.fn(async (_provider?: string, _id?: string) => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete: vi.fn(async () =>
+          JSON.stringify({
+            approved: false,
+            severity: "blocking",
+            summary: "Required implementation is missing.",
+            requiredCorrections: ["Fix the missing behavior."],
+            recommendedCorrections: [],
+            evidence: ["The diff does not include the required change."],
+            confidence: "high",
+          }),
+        ),
+      })),
+    };
+  }
+
+  const defaultEvent = {
+    messages: [
+      { role: "user", content: "Implement step 15.2." },
+      { role: "assistant", content: "Done." },
+    ],
+  };
+
+  // ---- approved ----
+
+  it("collects git, runs reviewer, persists approved result, and sends no follow-up", async () => {
+    const state = createFreshState();
+    const pi = createGitPi();
+    const complete = vi.fn(async () =>
+      JSON.stringify({
+        approved: true,
+        severity: "pass",
+        summary: "Delivery satisfies the request.",
+        requiredCorrections: [],
+        recommendedCorrections: [],
+        evidence: ["Reviewer approved the delivery."],
+        confidence: "high",
+      }),
+    );
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete,
+      })),
+    };
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: defaultEvent,
+      loadConfig: async () => configWithReviewerModel,
+      context: { modelRegistry },
+    });
+
+    expect(pi.exec).toHaveBeenCalledWith("git", ["status", "--short"], expect.any(Object));
+    expect(pi.exec).toHaveBeenCalledWith("git", ["diff", "--stat"], expect.any(Object));
+    expect(pi.exec).toHaveBeenCalledWith("git", ["diff"], expect.any(Object));
+
+    expect(modelRegistry.find).toHaveBeenCalledWith("test-provider", "test-model");
+
+    expect(complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        systemPrompt: expect.stringContaining("mandatory delivery reviewer"),
+        userPrompt: expect.stringContaining("Review the following delivery."),
+        timeoutMs: expect.any(Number),
+        thinkingLevel: "high",
+      }),
+    );
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        attempt: 0,
+        model: {
+          provider: "test-provider",
+          id: "test-model",
+          thinkingLevel: "high",
+        },
+        result: expect.objectContaining({
+          approved: true,
+          severity: "pass",
+        }),
+      }),
+    );
+
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  // ---- branch / session ----
+
+  it("uses session branch when available", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const getBranch = vi.fn(async () => [
+      {
+        type: "message",
+        message: { role: "user", content: "Original branch prompt" },
+      },
+    ]);
+    const modelRegistry = createApprovingModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Current prompt" }],
+      },
+      loadConfig: async () => configWithReviewerModel,
+      context: {
+        sessionManager: { getBranch },
+        modelRegistry,
+      },
+    });
+
+    expect(getBranch).toHaveBeenCalled();
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({ approved: true }),
+      }),
+    );
+    expect(state.activeReview).toBe(false);
+  });
+
+  it("does not throw when sessionManager is absent", async () => {
+    const state = createFreshState();
+    const pi = createGitPi();
+    const modelRegistry = createApprovingModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: defaultEvent,
+      loadConfig: async () => configWithReviewerModel,
+      context: { modelRegistry },
+    });
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({ approved: true }),
+      }),
+    );
+  });
+
+  it("treats non-array getBranch result as absent", async () => {
+    const state = createFreshState();
+    const pi = createGitPi();
+    const getBranch = vi.fn(async () => "not-an-array") as unknown as () => unknown[];
+    const modelRegistry = createApprovingModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: defaultEvent,
+      loadConfig: async () => configWithReviewerModel,
+      context: {
+        sessionManager: { getBranch },
+        modelRegistry,
+      },
+    });
+
+    expect(getBranch).toHaveBeenCalled();
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({ approved: true }),
+      }),
+    );
+  });
+
+  // ---- rejected (no follow-up yet) ----
+
+  it("persists rejected result without follow-up in this step", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const modelRegistry = createRejectingModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Prompt" }],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "block",
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+      }),
+      context: { modelRegistry },
+    });
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: false,
+          severity: "blocking",
+        }),
+      }),
+    );
+
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  // ---- error release ----
+
+  it("releases activeReview when git collection fails", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => {
+        throw new Error("git failed");
+      }),
+    };
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...defaultConfig,
+          enabled: true,
+          reviewerModel: {
+            provider: "test-provider",
+            id: "test-model",
+          },
+        }),
+        context: {
+          modelRegistry: { find: vi.fn() },
+        },
+      }),
+    ).rejects.toThrow("git failed");
+
+    expect(state.activeReview).toBe(false);
+  });
+
+  it("releases activeReview when model/reviewer fails", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const modelRegistry = {
+      find: vi.fn(async () => {
+        throw new Error("model not found");
+      }),
+    };
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...defaultConfig,
+          enabled: true,
+          reviewerModel: {
+            provider: "test-provider",
+            id: "test-model",
+          },
+        }),
+        context: { modelRegistry },
+      }),
+    ).rejects.toThrow("model not found");
+
+    expect(state.activeReview).toBe(false);
+  });
+
+  it("releases activeReview when result persistence fails", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(async () => {
+        throw new Error("append failed");
+      }),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const modelRegistry = createApprovingModelRegistry();
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...defaultConfig,
+          enabled: true,
+          reviewerModel: {
+            provider: "test-provider",
+            id: "test-model",
+          },
+        }),
+        context: { modelRegistry },
+      }),
+    ).rejects.toThrow("append failed");
+
+    expect(state.activeReview).toBe(false);
+  });
+
+  it("releases activeReview when sessionManager.getBranch throws", async () => {
+    const state = createFreshState();
+    const pi = createGitPi();
+    const modelRegistry = createApprovingModelRegistry();
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: defaultEvent,
+        loadConfig: async () => configWithReviewerModel,
+        context: {
+          sessionManager: {
+            getBranch: vi.fn(async () => {
+              throw new Error("branch failed");
+            }) as unknown as () => unknown[],
+          },
+          modelRegistry,
+        },
+      }),
+    ).rejects.toThrow("branch failed");
+
+    expect(state.activeReview).toBe(false);
+  });
+
+  // ---- attempt tracking ----
+
+  it("persists attempt from state.correctionCycle", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const modelRegistry = createApprovingModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: defaultEvent,
+      loadConfig: async () => configWithReviewerModel,
+      context: { modelRegistry },
+    });
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        attempt: 0,
+        result: expect.objectContaining({ approved: true }),
+      }),
+    );
+  });
+
+  it("does not call sendUserMessage for approved review", async () => {
+    const state = createFreshState();
+    const pi = createGitPi();
+    const modelRegistry = createApprovingModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: defaultEvent,
+      loadConfig: async () => configWithReviewerModel,
+      context: { modelRegistry },
+    });
+
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not call sendUserMessage for rejected review in this step", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const modelRegistry = createRejectingModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Prompt" }],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+      }),
+      context: { modelRegistry },
+    });
+
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
   });
 });

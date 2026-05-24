@@ -3,8 +3,10 @@ import {
   CUSTOM_ENTRY_REVIEW_RESULT,
   CUSTOM_ENTRY_REVIEW_SKIPPED,
 } from "./constants.js";
-import { extractCurrentUserPrompt } from "./context.js";
-import type { ModelClient } from "./model.js";
+import { buildReviewContext, extractCurrentUserPrompt } from "./context.js";
+import { collectGitContext } from "./git.js";
+import type { ModelClient, ModelRegistryAPI } from "./model.js";
+import { createModelClientFromContext } from "./model.js";
 import { safeParseReviewGateResult } from "./schema.js";
 import { beginReview, endReview, updateCycleState } from "./state.js";
 import type {
@@ -91,6 +93,11 @@ ${optionalTextOrMarker(context.gitUnavailableReason, "[none]")}`;
 
 type ReviewGateAgentEndAPI = {
   appendEntry(type: string, payload: unknown): Promise<void> | void;
+  exec(
+    command: string,
+    args: string[],
+    options?: { timeout?: number; signal?: AbortSignal },
+  ): Promise<{ stdout?: string; stderr?: string; code?: number | null; killed?: boolean }>;
 };
 
 export type { ReviewGateAgentEndAPI };
@@ -101,6 +108,15 @@ type ReviewGateAgentEndEvent = {
 };
 
 export type { ReviewGateAgentEndEvent };
+
+type ReviewGateSessionManagerAPI = {
+  getBranch?: () => unknown[] | Promise<unknown[]>;
+};
+
+type ReviewGateHandlerContext = {
+  sessionManager?: ReviewGateSessionManagerAPI;
+  modelRegistry?: ModelRegistryAPI;
+};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -372,8 +388,9 @@ export async function handleAgentEnd(params: {
   state: RuntimeState;
   event: ReviewGateAgentEndEvent;
   loadConfig: () => Promise<ReviewGateConfig>;
+  context?: ReviewGateHandlerContext;
 }): Promise<void> {
-  const { pi, state, event, loadConfig } = params;
+  const { pi, state, event, loadConfig, context } = params;
 
   const config = await loadConfig();
   if (!config.enabled) {
@@ -406,7 +423,51 @@ export async function handleAgentEnd(params: {
       return;
     }
 
-    // Future phases continue here.
+    // --- approved / rejected orchestration (Step 15.2) ---
+
+    // 1. Collect Git context
+    const gitContext = await collectGitContext({
+      pi,
+      config,
+      signal: event.signal,
+    });
+
+    // 2. Get optional session branch
+    const maybeBranch = await context?.sessionManager?.getBranch?.();
+    const branch = Array.isArray(maybeBranch) ? maybeBranch : undefined;
+
+    // 3. Build ReviewContext
+    const reviewContext = buildReviewContext({
+      eventMessages,
+      branch,
+      config,
+      gitContext,
+    });
+
+    // 4. Create model client
+    const modelClient = createModelClientFromContext({
+      modelRegistry: context?.modelRegistry,
+    });
+
+    // 5. Run reviewer
+    const result = await runReviewer({
+      config,
+      reviewContext,
+      modelClient,
+      signal: event.signal,
+    });
+
+    // 6. Persist result
+    await persistReviewResult({
+      pi,
+      result,
+      attempt: state.correctionCycle,
+      model: config.reviewerModel,
+    });
+
+    // 7. Approved: return without follow-up
+    // 8. Rejected (this step): persist only, no follow-up yet
+    return;
   } finally {
     endReview(state);
   }
