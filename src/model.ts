@@ -114,6 +114,15 @@ export type ModelRegistryAPI = {
     provider: string,
     id: string,
   ) => ModelRegistryCandidate | Promise<ModelRegistryCandidate | null | undefined>;
+  /**
+   * Resolve the API key and request headers for a model from Pi's credential
+   * store.  Returns `{ ok: false }` when no key is configured.
+   */
+  getApiKeyAndHeaders?: (
+    model: ModelRegistryCandidate,
+  ) =>
+    | Promise<{ ok: true; apiKey?: string; headers?: Record<string, string> }>
+    | Promise<{ ok: false; error: string }>;
 };
 
 export type ModelClientContext = {
@@ -309,6 +318,19 @@ export function createModelClientFromContext(context: ModelClientContext): Model
         }
 
         // Real Pi SDK path: use completeSimple from @earendil-works/pi-ai.
+
+        // Resolve the API key from Pi's credential store (the same way
+        // Pi's agent does it) so that keys configured via /login or
+        // settings.json are available to the reviewer model.
+        let apiKey: string | undefined;
+        if (modelRegistry.getApiKeyAndHeaders) {
+          const auth = await modelRegistry.getApiKeyAndHeaders(candidate);
+          if (!auth.ok) {
+            throw new Error(`Reviewer model auth error for ${modelLabel}: ${auth.error}`);
+          }
+          apiKey = auth.apiKey;
+        }
+
         const assistantMessage: AssistantMessage = await completeSimple(
           candidate as Model<Api>,
           {
@@ -322,6 +344,7 @@ export function createModelClientFromContext(context: ModelClientContext): Model
             ],
           },
           {
+            apiKey,
             signal: combinedSignal.signal,
             timeoutMs: params.timeoutMs,
             ...(params.model.thinkingLevel && params.model.thinkingLevel !== "off"
@@ -339,11 +362,21 @@ export function createModelClientFromContext(context: ModelClientContext): Model
 
         combinedSignal.throwIfTimedOutOrAborted();
 
+        // Some provider errors (auth, model not found, rate limit) are
+        // returned as an AssistantMessage with stopReason "error" and an
+        // errorMessage set, rather than thrown.  Detect and propagate.
+        if (assistantMessage.stopReason === "error" && assistantMessage.errorMessage) {
+          throw new Error(
+            `Reviewer model error for ${modelLabel}: ${assistantMessage.errorMessage}`,
+          );
+        }
+
         const textContents = extractAssistantText(assistantMessage);
         if (textContents.length === 0) {
           const blocks = describeContentBlocks(assistantMessage);
           throw new Error(
-            `Reviewer model returned no text content: ${modelLabel}. Content blocks: ${blocks}`,
+            `Reviewer model returned no text content: ${modelLabel}. ` +
+              `stopReason=${assistantMessage.stopReason}, blocks: ${blocks}`,
           );
         }
 

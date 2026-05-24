@@ -2,8 +2,7 @@
 
 ## Overview
 
-`pi-review-gate` is an extension for the Pi Extension Runtime. It reviews the coding agent's work at the end of each session cycle via the `agent_end` hook, using a separate reviewer model.
-
+`pi-review-gate` is an extension for the Pi Extension Runtime that reviews the coding agent's work at the end of each agent turn via the `agent_end` hook, using a separate reviewer model.
 In `block` mode, a rejection injects a mandatory correction follow-up that the agent must address. In `warn` mode, a rejection is persisted and optionally notified without blocking the agent.
 
 The goal is to reduce incomplete, incorrect, or unvalidated deliveries.
