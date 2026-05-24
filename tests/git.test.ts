@@ -149,6 +149,7 @@ describe("collectGitContext", () => {
       status: null,
       diffStat: null,
       diff: null,
+      unavailableReason: "Git collection is disabled.",
     });
     expect(pi.exec).not.toHaveBeenCalled();
   });
@@ -232,19 +233,22 @@ describe("collectGitContext", () => {
     });
   });
 
-  it("propagates exec errors in this step", async () => {
+  it("returns unavailable context when a git command throws an unexpected error", async () => {
     const pi = {
       exec: vi.fn(async () => {
         throw new Error("git failed");
       }),
     };
 
-    await expect(
-      collectGitContext({
-        pi,
-        config: defaultConfig,
-      }),
-    ).rejects.toThrow("git failed");
+    const result = await collectGitContext({
+      pi,
+      config: defaultConfig,
+    });
+
+    expect(result.status).toBeNull();
+    expect(result.diffStat).toBeNull();
+    expect(result.diff).toBeNull();
+    expect(result.unavailableReason).toBe("Git context unavailable: git failed");
   });
 
   it("does not mutate config", async () => {
@@ -338,7 +342,7 @@ describe("collectGitContext non-git handling", () => {
       status: null,
       diffStat: null,
       diff: null,
-      unavailableReason: "Git context unavailable: current directory is not a git repository.",
+      unavailableReason: "Git context unavailable: not a git repository.",
     });
     expect(pi.exec).toHaveBeenCalledTimes(1);
   });
@@ -362,27 +366,30 @@ describe("collectGitContext non-git handling", () => {
       status: null,
       diffStat: null,
       diff: null,
-      unavailableReason: "Git context unavailable: current directory is not a git repository.",
+      unavailableReason: "Git context unavailable: not a git repository.",
     });
     expect(pi.exec).toHaveBeenCalledTimes(2);
   });
 
-  it("propagates unrelated git errors", async () => {
+  it("returns unavailable context for unexpected git errors without throwing", async () => {
     const pi = {
       exec: vi.fn(async () => {
         throw new Error("permission denied");
       }),
     };
 
-    await expect(
-      collectGitContext({
-        pi,
-        config: defaultConfig,
-      }),
-    ).rejects.toThrow("permission denied");
+    const result = await collectGitContext({
+      pi,
+      config: defaultConfig,
+    });
+
+    expect(result.status).toBeNull();
+    expect(result.diffStat).toBeNull();
+    expect(result.diff).toBeNull();
+    expect(result.unavailableReason).toBe("Git context unavailable: permission denied");
   });
 
-  it("does not add unavailableReason when git collection is disabled", async () => {
+  it("returns unavailableReason when git collection is disabled", async () => {
     const pi = {
       exec: vi.fn(),
     };
@@ -403,9 +410,81 @@ describe("collectGitContext non-git handling", () => {
       status: null,
       diffStat: null,
       diff: null,
+      unavailableReason: "Git collection is disabled.",
     });
-    expect("unavailableReason" in result).toBe(false);
     expect(pi.exec).not.toHaveBeenCalled();
+  });
+});
+
+describe("collectGitContext unexpected git error handling", () => {
+  it("returns unavailable context with stderr message in unexpected errors", async () => {
+    const pi = {
+      exec: vi.fn(async () => {
+        throw {
+          stderr: "permission denied",
+        };
+      }),
+    };
+
+    const result = await collectGitContext({
+      pi,
+      config: defaultConfig,
+    });
+
+    expect(result.status).toBeNull();
+    expect(result.diffStat).toBeNull();
+    expect(result.diff).toBeNull();
+    expect(result.unavailableReason).toBe("Git context unavailable: permission denied");
+  });
+
+  it("falls back to stdout when stderr is absent", async () => {
+    const pi = {
+      exec: vi.fn(async () => {
+        throw {
+          stdout: "error in stdout",
+        };
+      }),
+    };
+
+    const result = await collectGitContext({
+      pi,
+      config: defaultConfig,
+    });
+
+    expect(result.unavailableReason).toBe("Git context unavailable: error in stdout");
+  });
+
+  it("falls back to message when stderr and stdout are absent", async () => {
+    const pi = {
+      exec: vi.fn(async () => {
+        throw new Error("command timed out");
+      }),
+    };
+
+    const result = await collectGitContext({
+      pi,
+      config: defaultConfig,
+    });
+
+    expect(result.unavailableReason).toBe("Git context unavailable: command timed out");
+  });
+
+  it("falls back to unknown Git error when no message is available", async () => {
+    const pi = {
+      exec: vi.fn(async () => {
+        throw {};
+      }),
+    };
+
+    const result = await collectGitContext({
+      pi,
+      config: defaultConfig,
+    });
+
+    expect(result.status).toBeNull();
+    expect(result.diffStat).toBeNull();
+    expect(result.diff).toBeNull();
+    expect(result.unavailableReason).toBe("Git context unavailable: unknown Git error.");
   });
 });
 
@@ -540,7 +619,7 @@ describe("collectGitContext truncation", () => {
       status: null,
       diffStat: null,
       diff: null,
-      unavailableReason: "Git context unavailable: current directory is not a git repository.",
+      unavailableReason: "Git context unavailable: not a git repository.",
     });
   });
 
@@ -568,6 +647,7 @@ describe("collectGitContext truncation", () => {
       status: null,
       diffStat: null,
       diff: null,
+      unavailableReason: "Git collection is disabled.",
     });
     expect(pi.exec).not.toHaveBeenCalled();
   });

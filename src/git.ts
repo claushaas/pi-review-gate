@@ -42,6 +42,24 @@ function getErrorText(error: unknown): string {
   return parts.join("\n");
 }
 
+function extractGitErrorMessage(error: unknown): string {
+  if (typeof error === "object" && error !== null) {
+    if ("stderr" in error && typeof error.stderr === "string" && error.stderr.length > 0) {
+      return error.stderr;
+    }
+    if ("stdout" in error && typeof error.stdout === "string" && error.stdout.length > 0) {
+      return error.stdout;
+    }
+    if ("message" in error && typeof error.message === "string" && error.message.length > 0) {
+      return error.message;
+    }
+  }
+  if (typeof error === "string" && error.length > 0) {
+    return error;
+  }
+  return "unknown Git error.";
+}
+
 export function isNotGitRepositoryError(error: unknown): boolean {
   const text = getErrorText(error);
   return /not a git repository/i.test(text);
@@ -59,6 +77,7 @@ export async function collectGitContext(params: {
       status: null,
       diffStat: null,
       diff: null,
+      unavailableReason: "Git collection is disabled.",
     };
   }
 
@@ -110,9 +129,14 @@ export async function collectGitContext(params: {
         status: null,
         diffStat: null,
         diff: null,
-        unavailableReason: "Git context unavailable: current directory is not a git repository.",
+        unavailableReason: "Git context unavailable: not a git repository.",
       };
     }
-    throw error;
+    return {
+      status: null,
+      diffStat: null,
+      diff: null,
+      unavailableReason: `Git context unavailable: ${extractGitErrorMessage(error)}`,
+    };
   }
 }

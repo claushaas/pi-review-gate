@@ -799,7 +799,7 @@ describe("handleAgentEnd approved review orchestration", () => {
 
   // ---- error release ----
 
-  it("releases activeReview when git collection fails", async () => {
+  it("continues review and releases activeReview when git exec throws an unexpected error", async () => {
     const state = createFreshState();
     const pi = {
       appendEntry: vi.fn(),
@@ -808,28 +808,54 @@ describe("handleAgentEnd approved review orchestration", () => {
         throw new Error("git failed");
       }),
     };
+    const complete = vi.fn(async () =>
+      JSON.stringify({
+        approved: true,
+        severity: "pass",
+        summary: "ok",
+        requiredCorrections: [],
+        recommendedCorrections: [],
+        evidence: [],
+        confidence: "medium",
+      }),
+    );
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete,
+      })),
+    };
 
-    await expect(
-      handleAgentEnd({
-        pi,
-        state,
-        event: {
-          messages: [{ role: "user", content: "Prompt" }],
-        },
-        loadConfig: async () => ({
-          ...defaultConfig,
-          enabled: true,
-          reviewerModel: {
-            provider: "test-provider",
-            id: "test-model",
-          },
-        }),
-        context: {
-          modelRegistry: { find: vi.fn() },
+    await handleAgentEnd({
+      pi,
+      state,
+      event: { messages: [{ role: "user", content: "Prompt" }] },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
         },
       }),
-    ).rejects.toThrow("git failed");
+      context: { modelRegistry },
+    });
 
+    expect(complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userPrompt: expect.stringContaining("Git context unavailable: git failed"),
+      }),
+    );
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: true,
+        }),
+      }),
+    );
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
     expect(state.activeReview).toBe(false);
   });
 
@@ -997,6 +1023,133 @@ describe("handleAgentEnd approved review orchestration", () => {
     });
 
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 17.1 — Git unavailable context handling
+// ---------------------------------------------------------------------------
+
+describe("handleAgentEnd with unavailable git context", () => {
+  function createFreshState(): RuntimeState {
+    return createRuntimeState();
+  }
+
+  const configWithReviewerModel: ReviewGateConfig = {
+    ...defaultConfig,
+    enabled: true,
+    reviewerModel: {
+      provider: "test-provider",
+      id: "test-model",
+    },
+  };
+
+  it("continues review and persists approved result in a non-git directory", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => {
+        throw {
+          stderr: "fatal: not a git repository (or any of the parent directories): .git",
+        };
+      }),
+    };
+    const complete = vi.fn(async () =>
+      JSON.stringify({
+        approved: true,
+        severity: "pass",
+        summary: "Delivery satisfies the request.",
+        requiredCorrections: [],
+        recommendedCorrections: [],
+        evidence: ["Review completed even without Git context."],
+        confidence: "high",
+      }),
+    );
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete,
+      })),
+    };
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [
+          { role: "user", content: "Implement step 17.1." },
+          { role: "assistant", content: "Done." },
+        ],
+      },
+      loadConfig: async () => configWithReviewerModel,
+      context: { modelRegistry },
+    });
+
+    expect(complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userPrompt: expect.stringContaining("Git context unavailable: not a git repository."),
+      }),
+    );
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: true,
+        }),
+      }),
+    );
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  it("continues review with an unexpected git error represented in context", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => {
+        throw {
+          stderr: "permission denied",
+        };
+      }),
+    };
+    const complete = vi.fn(async () =>
+      JSON.stringify({
+        approved: true,
+        severity: "pass",
+        summary: "ok",
+        requiredCorrections: [],
+        recommendedCorrections: [],
+        evidence: [],
+        confidence: "medium",
+      }),
+    );
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete,
+      })),
+    };
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Prompt" }],
+      },
+      loadConfig: async () => configWithReviewerModel,
+      context: { modelRegistry },
+    });
+
+    expect(complete).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userPrompt: expect.stringContaining("Git context unavailable: permission denied"),
+      }),
+    );
+    expect(state.activeReview).toBe(false);
   });
 });
 

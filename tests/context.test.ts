@@ -575,16 +575,14 @@ describe("buildReviewContext", () => {
         status: null,
         diffStat: null,
         diff: null,
-        unavailableReason: "Git context unavailable: current directory is not a git repository.",
+        unavailableReason: "Git context unavailable: not a git repository.",
       },
     });
 
     expect(context.gitStatus).toBeNull();
     expect(context.gitDiffStat).toBeNull();
     expect(context.gitDiff).toBeNull();
-    expect(context.gitUnavailableReason).toBe(
-      "Git context unavailable: current directory is not a git repository.",
-    );
+    expect(context.gitUnavailableReason).toBe("Git context unavailable: not a git repository.");
   });
 
   it("accepts Git unavailable with all fields null", () => {
