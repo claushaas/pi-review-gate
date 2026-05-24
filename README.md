@@ -298,11 +298,17 @@ xhigh
 
 ## Validation
 
+### Automated
+
 ```bash
 pnpm typecheck          # TypeScript type checking (tsc --noEmit)
 pnpm check              # Biome lint and format check
 pnpm test               # Vitest test suite
 ```
+
+### Manual validation
+
+A manual validation checklist covering `/reload`, command registration, config persistence, and runtime behavior is available at [`docs/manual-validation.md`](docs/manual-validation.md). This checklist is designed for execution inside the Pi Runtime after the extension is loaded.
 
 ## Manual smoke test
 
