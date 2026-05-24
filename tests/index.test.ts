@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
+import { registerCommands } from "../src/commands.js";
 import { defaultConfig } from "../src/config.js";
 import {
+  COMMAND_REVIEW_GATE,
+  COMMAND_REVIEW_GATE_MODEL,
+  COMMAND_REVIEW_GATE_OFF,
+  COMMAND_REVIEW_GATE_ON,
+  COMMAND_REVIEW_GATE_STATUS,
   CORRECTION_REQUEST_MARKER,
   CUSTOM_ENTRY_FINAL_FAILURE,
   CUSTOM_ENTRY_REVIEW_RESULT,
@@ -1921,5 +1927,149 @@ describe("handleAgentEnd maximum correction cycles", () => {
 
     // Active review is released
     expect(state.activeReview).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 16.1 — registerCommands
+// ---------------------------------------------------------------------------
+
+describe("registerCommands", () => {
+  it("registers all review gate commands with registerCommand", () => {
+    const pi = {
+      registerCommand: vi.fn(),
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(),
+    };
+    registerCommands({ pi });
+
+    expect(pi.registerCommand).toHaveBeenCalledTimes(5);
+
+    const commandNames = pi.registerCommand.mock.calls.map((call) => call[0]);
+    expect(commandNames).toEqual([
+      COMMAND_REVIEW_GATE,
+      COMMAND_REVIEW_GATE_STATUS,
+      COMMAND_REVIEW_GATE_MODEL,
+      COMMAND_REVIEW_GATE_ON,
+      COMMAND_REVIEW_GATE_OFF,
+    ]);
+
+    for (const call of pi.registerCommand.mock.calls) {
+      expect(call[1]).toEqual(
+        expect.objectContaining({
+          description: expect.any(String),
+          handler: expect.any(Function),
+        }),
+      );
+    }
+
+    expect(pi.appendEntry).not.toHaveBeenCalled();
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(pi.exec).not.toHaveBeenCalled();
+  });
+
+  it("registers commands using command fallback", () => {
+    const pi = {
+      command: vi.fn(),
+    };
+    registerCommands({ pi });
+
+    expect(pi.command).toHaveBeenCalledTimes(5);
+    expect(pi.command.mock.calls[0][0]).toBe(COMMAND_REVIEW_GATE);
+  });
+
+  it("registers commands using commands.register fallback", () => {
+    const pi = {
+      commands: {
+        register: vi.fn(),
+      },
+    };
+    registerCommands({ pi });
+
+    expect(pi.commands.register).toHaveBeenCalledTimes(5);
+    expect(pi.commands.register.mock.calls[0][0]).toBe(COMMAND_REVIEW_GATE);
+  });
+
+  it("throws when no command registration API is available", () => {
+    expect(() =>
+      registerCommands({
+        pi: {},
+      }),
+    ).toThrow("Pi command registration API is not available.");
+  });
+
+  it("uses placeholder handlers for this step", async () => {
+    const pi = {
+      registerCommand: vi.fn(),
+    };
+    registerCommands({ pi });
+
+    const handlersByCommand = new Map(
+      pi.registerCommand.mock.calls.map(([name, options]) => [name, options.handler]),
+    );
+
+    await expect(Promise.resolve(handlersByCommand.get(COMMAND_REVIEW_GATE)?.())).resolves.toBe(
+      "Review gate menu is not implemented yet.",
+    );
+
+    await expect(
+      Promise.resolve(handlersByCommand.get(COMMAND_REVIEW_GATE_STATUS)?.()),
+    ).resolves.toBe("Review gate status command is not implemented yet.");
+
+    await expect(
+      Promise.resolve(handlersByCommand.get(COMMAND_REVIEW_GATE_MODEL)?.()),
+    ).resolves.toBe("Review gate model command is not implemented yet.");
+
+    await expect(Promise.resolve(handlersByCommand.get(COMMAND_REVIEW_GATE_ON)?.())).resolves.toBe(
+      "Review gate on command is not implemented yet.",
+    );
+
+    await expect(Promise.resolve(handlersByCommand.get(COMMAND_REVIEW_GATE_OFF)?.())).resolves.toBe(
+      "Review gate off command is not implemented yet.",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 16.1 — Entrypoint command registration
+// ---------------------------------------------------------------------------
+
+describe("extension entrypoint command registration", () => {
+  it("registers review gate commands and agent_end hook during initialization", async () => {
+    const pi = {
+      registerCommand: vi.fn(),
+      on: vi.fn(),
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(),
+    };
+
+    await extensionFactory(pi as unknown as Parameters<typeof extensionFactory>[0]);
+
+    expect(pi.registerCommand).toHaveBeenCalledTimes(5);
+    expect(pi.on).toHaveBeenCalledWith("agent_end", expect.any(Function));
+    expect(pi.exec).not.toHaveBeenCalled();
+    expect(pi.appendEntry).not.toHaveBeenCalled();
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not call Git or model during initialization", async () => {
+    const pi = {
+      registerCommand: vi.fn(),
+      on: vi.fn(),
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(),
+    };
+
+    await extensionFactory(pi as unknown as Parameters<typeof extensionFactory>[0]);
+
+    // exec should not be called (no git commands)
+    expect(pi.exec).not.toHaveBeenCalled();
+    // appendEntry should not be called (no review triggering)
+    expect(pi.appendEntry).not.toHaveBeenCalled();
+    // sendUserMessage should not be called
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
   });
 });

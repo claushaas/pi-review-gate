@@ -4,11 +4,11 @@ export const CONFIG_FILE_NAME = "config.json";
 
 export const CORRECTION_REQUEST_MARKER = "[pi-review-gate:correction-request]";
 
-export const COMMAND_REVIEW_GATE = "review-gate";
-export const COMMAND_REVIEW_GATE_STATUS = "review-gate-status";
-export const COMMAND_REVIEW_GATE_MODEL = "review-gate-model";
-export const COMMAND_REVIEW_GATE_ON = "review-gate-on";
-export const COMMAND_REVIEW_GATE_OFF = "review-gate-off";
+export const COMMAND_REVIEW_GATE = "/review-gate";
+export const COMMAND_REVIEW_GATE_STATUS = "/review-gate-status";
+export const COMMAND_REVIEW_GATE_MODEL = "/review-gate-model";
+export const COMMAND_REVIEW_GATE_ON = "/review-gate-on";
+export const COMMAND_REVIEW_GATE_OFF = "/review-gate-off";
 
 export const CUSTOM_ENTRY_REVIEW_RESULT = "pi-review-gate-result";
 export const CUSTOM_ENTRY_REVIEW_SKIPPED = "pi-review-gate-skipped";
