@@ -1186,7 +1186,12 @@ describe("handleAgentEnd block rejection with follow-up", () => {
       }),
     );
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
-    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_FINAL_FAILURE,
+      expect.objectContaining({
+        reason: "Maximum correction cycles exceeded.",
+      }),
+    );
     expect(state.activeReview).toBe(false);
   });
 
@@ -1517,5 +1522,404 @@ describe("handleAgentEnd warn rejection orchestration", () => {
     const [message, options] = pi.sendUserMessage.mock.calls[0];
     expect(message.startsWith(CORRECTION_REQUEST_MARKER)).toBe(true);
     expect(options).toEqual({ deliverAs: "followUp" });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 15.5 — Maximum correction cycles final failure
+// ---------------------------------------------------------------------------
+
+describe("handleAgentEnd maximum correction cycles", () => {
+  function createFreshState(): RuntimeState {
+    return createRuntimeState();
+  }
+
+  const rejectedReviewResult = {
+    approved: false,
+    severity: "blocking",
+    summary: "Required implementation is still missing.",
+    requiredCorrections: ["Implement the missing behavior."],
+    recommendedCorrections: ["Add tests for the correction path."],
+    evidence: ["The diff still does not include the required implementation."],
+    confidence: "high",
+  } as const;
+
+  function createGitPiMock() {
+    return {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async (command: string, args: string[]) => {
+        const joinedArgs = args.join(" ");
+        if (command !== "git") {
+          throw new Error(`Unexpected command: ${command}`);
+        }
+        if (joinedArgs === "status --short") {
+          return { stdout: " M src/reviewer.ts\n" };
+        }
+        if (joinedArgs === "diff --stat") {
+          return { stdout: " src/reviewer.ts | 10 ++++++++++\n" };
+        }
+        if (joinedArgs === "diff") {
+          return {
+            stdout: "diff --git a/src/reviewer.ts b/src/reviewer.ts\n",
+          };
+        }
+        throw new Error(`Unexpected git args: ${joinedArgs}`);
+      }),
+    };
+  }
+
+  function createRejectedModelRegistry() {
+    const complete = vi.fn(async () => JSON.stringify(rejectedReviewResult));
+    return {
+      complete,
+      modelRegistry: {
+        find: vi.fn(async () => ({
+          provider: "test-provider",
+          id: "test-model",
+          complete,
+        })),
+      },
+    };
+  }
+
+  const blockConfig: ReviewGateConfig = {
+    ...defaultConfig,
+    enabled: true,
+    mode: "block",
+    maxCorrectionCycles: 2,
+    reviewerModel: {
+      provider: "test-provider",
+      id: "test-model",
+      thinkingLevel: "high",
+    },
+    ui: {
+      ...defaultConfig.ui,
+      notifyOnFail: true,
+    },
+  };
+
+  // ---- final failure persistence at cycle limit ----
+
+  it("persists final failure and sends no follow-up when block cycle limit is reached", async () => {
+    const state = createFreshState();
+    state.correctionCycle = 1;
+    const pi = createGitPiMock();
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [
+          {
+            role: "user",
+            content: `${CORRECTION_REQUEST_MARKER}\n# Mandatory Review Corrections\nPlease fix.`,
+          },
+        ],
+      },
+      loadConfig: async () => blockConfig,
+      context: { modelRegistry },
+    });
+
+    // Result is persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: false,
+          severity: "blocking",
+        }),
+      }),
+    );
+
+    // Final failure is persisted with correct payload
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_FINAL_FAILURE,
+      expect.objectContaining({
+        attempt: 2,
+        maxCorrectionCycles: 2,
+        model: {
+          provider: "test-provider",
+          id: "test-model",
+          thinkingLevel: "high",
+        },
+        reason: "Maximum correction cycles exceeded.",
+        result: expect.objectContaining({
+          approved: false,
+          severity: "blocking",
+          requiredCorrections: ["Implement the missing behavior."],
+          recommendedCorrections: ["Add tests for the correction path."],
+          evidence: ["The diff still does not include the required implementation."],
+        }),
+      }),
+    );
+
+    // No follow-up is sent
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // Active review is released
+    expect(state.activeReview).toBe(false);
+  });
+
+  // ---- block follow-up preserved within limit ----
+
+  it("preserves block follow-up behavior when cycles are still available", async () => {
+    const state = createFreshState();
+    state.correctionCycle = 1;
+    const pi = createGitPiMock();
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Prompt" }],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "block",
+        maxCorrectionCycles: 2,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+      }),
+      context: { modelRegistry },
+    });
+
+    // Follow-up is sent
+    expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
+    const [message, options] = pi.sendUserMessage.mock.calls[0];
+    expect(message.startsWith(CORRECTION_REQUEST_MARKER)).toBe(true);
+    expect(options).toEqual({ deliverAs: "followUp" });
+
+    // No final failure is created
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+
+    expect(state.activeReview).toBe(false);
+  });
+
+  // ---- warn mode does not create final failure ----
+
+  it("does not create final failure in warn mode even when cycle limit is reached", async () => {
+    const state = createFreshState();
+    state.correctionCycle = 2;
+    const pi = createGitPiMock();
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [{ role: "user", content: "Prompt" }],
+      },
+      loadConfig: async () => ({
+        ...defaultConfig,
+        enabled: true,
+        mode: "warn",
+        maxCorrectionCycles: 2,
+        reviewerModel: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+        ui: {
+          ...defaultConfig.ui,
+          notifyOnFail: false,
+        },
+      }),
+      context: {
+        modelRegistry,
+      },
+    });
+
+    // Result is persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      CUSTOM_ENTRY_REVIEW_RESULT,
+      expect.objectContaining({
+        result: expect.objectContaining({
+          approved: false,
+        }),
+      }),
+    );
+
+    // No follow-up
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // No final failure
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+
+    expect(state.activeReview).toBe(false);
+  });
+
+  // ---- optional notification when ui is available ----
+
+  it("optionally notifies final failure when ui notify is available and enabled", async () => {
+    const state = createFreshState();
+    state.correctionCycle = 1;
+    const pi = createGitPiMock();
+    const ui = {
+      notify: vi.fn(),
+    };
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await handleAgentEnd({
+      pi,
+      state,
+      event: {
+        messages: [
+          {
+            role: "user",
+            content: `${CORRECTION_REQUEST_MARKER}\n# Mandatory Review Corrections\nPlease fix.`,
+          },
+        ],
+      },
+      loadConfig: async () => blockConfig,
+      context: {
+        modelRegistry,
+        ui,
+      },
+    });
+
+    // Notification is called with correct params
+    expect(ui.notify).toHaveBeenCalledWith({
+      title: "Review gate stopped",
+      message: "Maximum correction cycles exceeded.",
+      severity: "error",
+    });
+
+    // No follow-up
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    expect(state.activeReview).toBe(false);
+  });
+
+  // ---- graceful when ui notify absent ----
+
+  it("does not fail when ui notify is unavailable for final failure", async () => {
+    const state = createFreshState();
+    state.correctionCycle = 1;
+    const pi = createGitPiMock();
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [
+            {
+              role: "user",
+              content: `${CORRECTION_REQUEST_MARKER}\n# Mandatory Review Corrections\nPlease fix.`,
+            },
+          ],
+        },
+        loadConfig: async () => blockConfig,
+        context: {
+          modelRegistry,
+        },
+      }),
+    ).resolves.toBeUndefined();
+
+    // Final failure is still persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+
+    // No follow-up
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    expect(state.activeReview).toBe(false);
+  });
+
+  // ---- error propagation when final failure persistence fails ----
+
+  it("releases activeReview when final failure persistence fails", async () => {
+    const state = createFreshState();
+    state.correctionCycle = 1;
+    const pi = {
+      ...createGitPiMock(),
+      appendEntry: vi
+        .fn()
+        .mockResolvedValueOnce(undefined) // result persistence succeeds
+        .mockRejectedValueOnce(new Error("final failure append failed")), // final failure fails
+    };
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [
+            {
+              role: "user",
+              content: `${CORRECTION_REQUEST_MARKER}\n# Mandatory Review Corrections\nPlease fix.`,
+            },
+          ],
+        },
+        loadConfig: async () => ({
+          ...defaultConfig,
+          enabled: true,
+          mode: "block",
+          maxCorrectionCycles: 2,
+          reviewerModel: {
+            provider: "test-provider",
+            id: "test-model",
+          },
+        }),
+        context: {
+          modelRegistry,
+        },
+      }),
+    ).rejects.toThrow("final failure append failed");
+
+    // Result was persisted before the failure
+    expect(pi.appendEntry).toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, expect.anything());
+
+    // Active review is released even on error
+    expect(state.activeReview).toBe(false);
+  });
+
+  // ---- notification failure does not prevent releasing activeReview ----
+
+  it("releases activeReview when notification throws during final failure", async () => {
+    const state = createFreshState();
+    state.correctionCycle = 1;
+    const pi = createGitPiMock();
+    const ui = {
+      notify: vi.fn(async () => {
+        throw new Error("notification failed");
+      }),
+    };
+    const { modelRegistry } = createRejectedModelRegistry();
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [
+            {
+              role: "user",
+              content: `${CORRECTION_REQUEST_MARKER}\n# Mandatory Review Corrections\nPlease fix.`,
+            },
+          ],
+        },
+        loadConfig: async () => blockConfig,
+        context: {
+          modelRegistry,
+          ui,
+        },
+      }),
+    ).rejects.toThrow("notification failed");
+
+    // Final failure was persisted
+    expect(pi.appendEntry).toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+
+    // No follow-up
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+
+    // Active review is released
+    expect(state.activeReview).toBe(false);
   });
 });

@@ -505,7 +505,24 @@ export async function handleAgentEnd(params: {
         await pi.sendUserMessage(followUp, { deliverAs: "followUp" });
         return;
       }
-      // Step 15.5 will persist final failure here.
+      // Maximum correction cycles exceeded: persist final failure.
+      await persistReviewFinalFailure({
+        pi,
+        result,
+        attempt: state.correctionCycle,
+        maxCorrectionCycles: config.maxCorrectionCycles,
+        model: config.reviewerModel,
+        reason: "Maximum correction cycles exceeded.",
+      });
+
+      // Optionally notify the user when UI notify is available and enabled.
+      if (config.ui.notifyOnFail && context?.ui?.notify) {
+        await context.ui.notify({
+          title: "Review gate stopped",
+          message: "Maximum correction cycles exceeded.",
+          severity: "error",
+        });
+      }
       return;
     }
 
