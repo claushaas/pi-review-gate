@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,7 @@ import {
   resolveConfigPath,
   saveConfig,
 } from "../src/config.js";
+import { validateConfig } from "../src/schema.js";
 
 describe("defaultConfig", () => {
   it("uses the expected top-level defaults", () => {
@@ -236,6 +238,48 @@ describe("config persistence", () => {
       await expect(loadConfig(path)).rejects.toThrow("config.maxCorrectionCycles");
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Example config validation
+// ---------------------------------------------------------------------------
+
+describe("example config", () => {
+  const EXAMPLE_CONFIG_PATH = join(process.cwd(), "examples", "config.example.json");
+
+  it("is parseable valid JSON", () => {
+    const raw = readFileSync(EXAMPLE_CONFIG_PATH, "utf8");
+    expect(() => JSON.parse(raw)).not.toThrow();
+  });
+
+  it("passes schema validation", () => {
+    const raw = readFileSync(EXAMPLE_CONFIG_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    expect(validateConfig(parsed)).toBeDefined();
+  });
+
+  it("matches defaultConfig", () => {
+    const raw = readFileSync(EXAMPLE_CONFIG_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    expect(validateConfig(parsed)).toEqual(defaultConfig);
+  });
+
+  it("does not contain secrets or credentials", () => {
+    const raw = readFileSync(EXAMPLE_CONFIG_PATH, "utf8");
+    const lower = raw.toLowerCase();
+    const secretIndicators = [
+      "apikey",
+      "api_key",
+      "password",
+      "secret",
+      "token",
+      "credential",
+      "private_key",
+    ];
+    for (const indicator of secretIndicators) {
+      expect(lower).not.toContain(indicator);
     }
   });
 });
