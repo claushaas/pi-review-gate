@@ -45,7 +45,7 @@ describe("defaultConfig", () => {
     expect(defaultConfig.reviewer).toEqual({
       requireJson: true,
       failClosedOnInvalidJson: true,
-      timeoutMs: 120_000,
+      timeoutMs: 300_000,
     });
   });
 
@@ -107,7 +107,7 @@ describe("mergeConfig", () => {
   it("merges reviewer preserving absent fields", () => {
     const result = mergeConfig({ reviewer: { requireJson: false } });
     expect(result.reviewer.requireJson).toBe(false);
-    expect(result.reviewer.timeoutMs).toBe(120_000);
+    expect(result.reviewer.timeoutMs).toBe(300_000);
   });
 
   it("merges ui preserving absent fields", () => {

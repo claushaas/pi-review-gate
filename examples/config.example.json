@@ -21,7 +21,7 @@
   "reviewer": {
     "requireJson": true,
     "failClosedOnInvalidJson": true,
-    "timeoutMs": 120000
+    "timeoutMs": 300000
   },
   "ui": {
     "notifyOnPass": true,
