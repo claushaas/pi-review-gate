@@ -2,6 +2,7 @@ import {
   CUSTOM_ENTRY_FINAL_FAILURE,
   CUSTOM_ENTRY_REVIEW_RESULT,
   CUSTOM_ENTRY_REVIEW_SKIPPED,
+  REVIEW_ERROR_ENTRY_TYPE,
 } from "./constants.js";
 import { buildReviewContext, extractCurrentUserPrompt } from "./context.js";
 import { buildCorrectionFollowUp } from "./follow-up.js";
@@ -368,6 +369,102 @@ export async function persistReviewSkipped(params: {
 }
 
 // ---------------------------------------------------------------------------
+// Private error helpers
+// ---------------------------------------------------------------------------
+
+function getErrorName(error: unknown): string {
+  if (error instanceof Error && error.name.trim().length > 0) {
+    return error.name;
+  }
+  return "Error";
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message;
+  }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "message" in error &&
+    typeof error.message === "string" &&
+    error.message.trim().length > 0
+  ) {
+    return error.message;
+  }
+  if (typeof error === "string" && error.trim().length > 0) {
+    return error;
+  }
+  return "Unknown reviewer error.";
+}
+
+// ---------------------------------------------------------------------------
+// persistReviewError
+// ---------------------------------------------------------------------------
+
+/**
+ * Persists a reviewer/model error entry via {@link ReviewGateAppendEntryAPI.appendEntry}.
+ *
+ * The payload uses {@link REVIEW_ERROR_ENTRY_TYPE} and includes the error
+ * phase ("model" or "reviewer"), the attempt number, the model, and a
+ * defensive extraction of the error's name and message.
+ *
+ * This function is the only authorized path for recording reviewer failures.
+ * It does not call the model, send messages, or build follow-ups.
+ *
+ * @param params.pi       - The minimal Pi API exposing `appendEntry`.
+ * @param params.error    - The error that caused the failure (any shape).
+ * @param params.phase    - Which phase failed ("model" or "reviewer").
+ * @param params.attempt  - The correction cycle attempt number.
+ * @param params.model    - The reviewer model (or `null`).
+ * @param params.timestamp - Optional ISO-8601 timestamp; defaults to `new Date().toISOString()`.
+ */
+export async function persistReviewError(params: {
+  pi: ReviewGateAppendEntryAPI;
+  error: unknown;
+  phase: "model" | "reviewer";
+  attempt: number;
+  model: ReviewerModelConfig | null;
+  timestamp?: string;
+}): Promise<void> {
+  const { pi, error, phase, attempt, model, timestamp } = params;
+  await pi.appendEntry(REVIEW_ERROR_ENTRY_TYPE, {
+    timestamp: timestamp ?? new Date().toISOString(),
+    phase,
+    attempt,
+    model,
+    error: {
+      name: getErrorName(error),
+      message: getErrorMessage(error),
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Private notification helper
+// ---------------------------------------------------------------------------
+
+async function notifyReviewFailure(params: {
+  context?: ReviewGateHandlerContext;
+  config: ReviewGateConfig;
+  error: unknown;
+}): Promise<void> {
+  const { context, config, error } = params;
+  if (!context?.ui?.notify) {
+    return;
+  }
+  try {
+    await context.ui.notify({
+      title: "Review gate failed",
+      message: getErrorMessage(error),
+      severity: config.mode === "block" ? "error" : "warning",
+    });
+  } catch {
+    // Notification failure must not mask the original reviewer/model error.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // persistReviewFinalFailure
 // ---------------------------------------------------------------------------
 
@@ -477,13 +574,33 @@ export async function handleAgentEnd(params: {
       modelRegistry: context?.modelRegistry,
     });
 
-    // 5. Run reviewer
-    const result = await runReviewer({
-      config,
-      reviewContext,
-      modelClient,
-      signal: event.signal,
-    });
+    // 5. Run reviewer (with error handling for model/reviewer failures)
+    let result: ReviewGateResult;
+    try {
+      result = await runReviewer({
+        config,
+        reviewContext,
+        modelClient,
+        signal: event.signal,
+      });
+    } catch (error) {
+      await persistReviewError({
+        pi,
+        error,
+        phase: "reviewer",
+        attempt: state.correctionCycle,
+        model: config.reviewerModel,
+      });
+      await notifyReviewFailure({
+        context,
+        config,
+        error,
+      });
+      if (config.mode === "block") {
+        throw error;
+      }
+      return;
+    }
 
     // 6. Persist result
     await persistReviewResult({

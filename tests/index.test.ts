@@ -11,6 +11,7 @@ import {
   CUSTOM_ENTRY_FINAL_FAILURE,
   CUSTOM_ENTRY_REVIEW_RESULT,
   CUSTOM_ENTRY_REVIEW_SKIPPED,
+  REVIEW_ERROR_ENTRY_TYPE,
 } from "../src/constants.js";
 import extensionFactory from "../src/index.js";
 import type { ModelRegistryAPI } from "../src/model.js";
@@ -859,7 +860,7 @@ describe("handleAgentEnd approved review orchestration", () => {
     expect(state.activeReview).toBe(false);
   });
 
-  it("releases activeReview when model/reviewer fails", async () => {
+  it("persists error and propagates when model/reviewer fails in block mode", async () => {
     const state = createFreshState();
     const pi = {
       appendEntry: vi.fn(),
@@ -891,6 +892,18 @@ describe("handleAgentEnd approved review orchestration", () => {
       }),
     ).rejects.toThrow("model not found");
 
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        phase: "reviewer",
+        attempt: 0,
+        error: expect.objectContaining({
+          message: "model not found",
+        }),
+      }),
+    );
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, expect.anything());
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
     expect(state.activeReview).toBe(false);
   });
 
@@ -1149,6 +1162,434 @@ describe("handleAgentEnd with unavailable git context", () => {
         userPrompt: expect.stringContaining("Git context unavailable: permission denied"),
       }),
     );
+    expect(state.activeReview).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Step 17.2 — Model failure and timeout handling
+// ---------------------------------------------------------------------------
+
+describe("handleAgentEnd model failure handling", () => {
+  function createFreshState(): RuntimeState {
+    return createRuntimeState();
+  }
+
+  const configWithReviewerModel: ReviewGateConfig = {
+    ...defaultConfig,
+    enabled: true,
+    reviewerModel: {
+      provider: "test-provider",
+      id: "test-model",
+    },
+  };
+
+  // -- model failure in block mode --
+
+  it("persists and propagates model failure in block mode", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete: vi.fn(async () => {
+          throw new Error("model failed");
+        }),
+      })),
+    };
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...configWithReviewerModel,
+          mode: "block",
+        }),
+        context: { modelRegistry },
+      }),
+    ).rejects.toThrow("model failed");
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        phase: "reviewer",
+        attempt: 0,
+        model: {
+          provider: "test-provider",
+          id: "test-model",
+        },
+        error: {
+          name: "Error",
+          message: "model failed",
+        },
+      }),
+    );
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, expect.anything());
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_FINAL_FAILURE, expect.anything());
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  // -- timeout in block mode --
+
+  it("persists timeout as review error and propagates in block mode", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete: vi.fn(async () => {
+          throw new Error("Reviewer model request timed out after 10ms.");
+        }),
+      })),
+    };
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...configWithReviewerModel,
+          mode: "block",
+          reviewer: {
+            ...configWithReviewerModel.reviewer,
+            timeoutMs: 10,
+          },
+        }),
+        context: { modelRegistry },
+      }),
+    ).rejects.toThrow("Reviewer model request timed out after 10ms.");
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        error: expect.objectContaining({
+          message: "Reviewer model request timed out after 10ms.",
+        }),
+      }),
+    );
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, expect.anything());
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  // -- abort in block mode --
+
+  it("persists abort as review error and propagates in block mode", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete: vi.fn(async () => {
+          throw new Error("Reviewer model request was aborted.");
+        }),
+      })),
+    };
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...configWithReviewerModel,
+          mode: "block",
+        }),
+        context: { modelRegistry },
+      }),
+    ).rejects.toThrow("Reviewer model request was aborted.");
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        error: expect.objectContaining({
+          message: "Reviewer model request was aborted.",
+        }),
+      }),
+    );
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, expect.anything());
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  // -- model failure in warn mode --
+
+  it("persists model failure without throwing in warn mode", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete: vi.fn(async () => {
+          throw new Error("model failed");
+        }),
+      })),
+    };
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...configWithReviewerModel,
+          mode: "warn",
+        }),
+        context: { modelRegistry },
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        error: expect.objectContaining({
+          message: "model failed",
+        }),
+      }),
+    );
+    expect(pi.appendEntry).not.toHaveBeenCalledWith(CUSTOM_ENTRY_REVIEW_RESULT, expect.anything());
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+    expect(state.activeReview).toBe(false);
+  });
+
+  // -- notification --
+
+  it("notifies model failure when ui notify is available in block mode", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const ui = {
+      notify: vi.fn(),
+    };
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete: vi.fn(async () => {
+          throw new Error("model failed");
+        }),
+      })),
+    };
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...configWithReviewerModel,
+          mode: "block",
+        }),
+        context: { modelRegistry, ui },
+      }),
+    ).rejects.toThrow("model failed");
+
+    expect(ui.notify).toHaveBeenCalledWith({
+      title: "Review gate failed",
+      message: "model failed",
+      severity: "error",
+    });
+    expect(state.activeReview).toBe(false);
+  });
+
+  it("notifies model failure when ui notify is available in warn mode", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const ui = {
+      notify: vi.fn(),
+    };
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete: vi.fn(async () => {
+          throw new Error("model failed");
+        }),
+      })),
+    };
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...configWithReviewerModel,
+          mode: "warn",
+        }),
+        context: { modelRegistry, ui },
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(ui.notify).toHaveBeenCalledWith({
+      title: "Review gate failed",
+      message: "model failed",
+      severity: "warning",
+    });
+    expect(state.activeReview).toBe(false);
+  });
+
+  it("does not break when ui notify is unavailable", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete: vi.fn(async () => {
+          throw new Error("model failed");
+        }),
+      })),
+    };
+
+    // No ui in context — should not throw because ui is absent.
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...configWithReviewerModel,
+          mode: "warn",
+        }),
+        context: { modelRegistry },
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
+    expect(state.activeReview).toBe(false);
+  });
+
+  it("does not fail when ui notify throws in warn mode", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const ui = {
+      notify: vi.fn(async () => {
+        throw new Error("notify failed");
+      }),
+    };
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete: vi.fn(async () => {
+          throw new Error("model failed");
+        }),
+      })),
+    };
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...configWithReviewerModel,
+          mode: "warn",
+        }),
+        context: { modelRegistry, ui },
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(ui.notify).toHaveBeenCalled();
+    expect(pi.appendEntry).toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
+    expect(state.activeReview).toBe(false);
+  });
+
+  it("still propagates the original model error when ui notify throws in block mode", async () => {
+    const state = createFreshState();
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+      exec: vi.fn(async () => ({ stdout: "" })),
+    };
+    const ui = {
+      notify: vi.fn(async () => {
+        throw new Error("notify failed");
+      }),
+    };
+    const modelRegistry = {
+      find: vi.fn(async () => ({
+        provider: "test-provider",
+        id: "test-model",
+        complete: vi.fn(async () => {
+          throw new Error("model failed");
+        }),
+      })),
+    };
+
+    await expect(
+      handleAgentEnd({
+        pi,
+        state,
+        event: {
+          messages: [{ role: "user", content: "Prompt" }],
+        },
+        loadConfig: async () => ({
+          ...configWithReviewerModel,
+          mode: "block",
+        }),
+        context: { modelRegistry, ui },
+      }),
+    ).rejects.toThrow("model failed");
+
+    expect(ui.notify).toHaveBeenCalled();
+    expect(pi.appendEntry).toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, expect.anything());
     expect(state.activeReview).toBe(false);
   });
 });

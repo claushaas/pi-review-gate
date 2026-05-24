@@ -4,12 +4,14 @@ import {
   CUSTOM_ENTRY_FINAL_FAILURE,
   CUSTOM_ENTRY_REVIEW_RESULT,
   CUSTOM_ENTRY_REVIEW_SKIPPED,
+  REVIEW_ERROR_ENTRY_TYPE,
 } from "../src/constants.js";
 import type { ModelClient } from "../src/model.js";
 import { createModelClientFromContext, createUnavailableModelClient } from "../src/model.js";
 import {
   buildReviewerSystemPrompt,
   buildReviewerUserPrompt,
+  persistReviewError,
   persistReviewFinalFailure,
   persistReviewResult,
   persistReviewSkipped,
@@ -1737,5 +1739,216 @@ describe("persistReviewFinalFailure", () => {
       reason: "Maximum correction cycles exceeded.",
     });
     expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// persistReviewError
+// ---------------------------------------------------------------------------
+
+describe("persistReviewError", () => {
+  it("persists reviewer errors with the correct entry type", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+      sendUserMessage: vi.fn(),
+    };
+
+    await persistReviewError({
+      pi,
+      error: new Error("model failed"),
+      phase: "reviewer",
+      attempt: 1,
+      model: {
+        provider: "test-provider",
+        id: "test-model",
+        thinkingLevel: "high",
+      },
+      timestamp: "2026-05-23T12:00:00.000Z",
+    });
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(REVIEW_ERROR_ENTRY_TYPE, {
+      timestamp: "2026-05-23T12:00:00.000Z",
+      phase: "reviewer",
+      attempt: 1,
+      model: {
+        provider: "test-provider",
+        id: "test-model",
+        thinkingLevel: "high",
+      },
+      error: {
+        name: "Error",
+        message: "model failed",
+      },
+    });
+    expect(pi.sendUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("accepts model null", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+
+    await persistReviewError({
+      pi,
+      error: new Error("timeout"),
+      phase: "model",
+      attempt: 0,
+      model: null,
+    });
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        model: null,
+        error: expect.objectContaining({
+          message: "timeout",
+        }),
+      }),
+    );
+  });
+
+  it("uses fallback message for errors without a message", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+
+    await persistReviewError({
+      pi,
+      error: {},
+      phase: "model",
+      attempt: 0,
+      model: null,
+      timestamp: "2026-05-23T12:00:00.000Z",
+    });
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        error: {
+          name: "Error",
+          message: "Unknown reviewer error.",
+        },
+      }),
+    );
+  });
+
+  it("uses fallback message for empty string errors", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+
+    await persistReviewError({
+      pi,
+      error: "",
+      phase: "reviewer",
+      attempt: 1,
+      model: null,
+    });
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        error: {
+          name: "Error",
+          message: "Unknown reviewer error.",
+        },
+      }),
+    );
+  });
+
+  it("accepts string errors", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+
+    await persistReviewError({
+      pi,
+      error: "something went wrong",
+      phase: "reviewer",
+      attempt: 2,
+      model: null,
+    });
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        error: {
+          name: "Error",
+          message: "something went wrong",
+        },
+      }),
+    );
+  });
+
+  it("accepts objects with message property", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+
+    await persistReviewError({
+      pi,
+      error: { message: "custom error object" },
+      phase: "reviewer",
+      attempt: 1,
+      model: null,
+    });
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        error: {
+          name: "Error",
+          message: "custom error object",
+        },
+      }),
+    );
+  });
+
+  it("extracts error name from Error instances", async () => {
+    const pi = {
+      appendEntry: vi.fn(),
+    };
+    class CustomError extends Error {
+      constructor(message: string) {
+        super(message);
+        this.name = "CustomError";
+      }
+    }
+
+    await persistReviewError({
+      pi,
+      error: new CustomError("custom error"),
+      phase: "reviewer",
+      attempt: 1,
+      model: null,
+    });
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      REVIEW_ERROR_ENTRY_TYPE,
+      expect.objectContaining({
+        error: {
+          name: "CustomError",
+          message: "custom error",
+        },
+      }),
+    );
+  });
+
+  it("propagates appendEntry errors", async () => {
+    const pi = {
+      appendEntry: vi.fn(async () => {
+        throw new Error("append failed");
+      }),
+    };
+
+    await expect(
+      persistReviewError({
+        pi,
+        error: new Error("model failed"),
+        phase: "reviewer",
+        attempt: 1,
+        model: null,
+      }),
+    ).rejects.toThrow("append failed");
   });
 });
