@@ -597,7 +597,7 @@ describe("createModelClientFromContext timeout", () => {
         ...completionParams,
         timeoutMs: 10,
       }),
-    ).rejects.toThrow("Reviewer model request timed out after 10ms.");
+    ).rejects.toThrow(/Reviewer model request timed out after 10ms/);
 
     // The signal passed to the model should be aborted after timeout.
     const call = complete.mock.calls[0]?.[0] as { signal?: AbortSignal } | undefined;
@@ -879,7 +879,7 @@ describe("createModelClientFromContext external signal", () => {
         signal: controller.signal,
         timeoutMs: 10,
       }),
-    ).rejects.toThrow("Reviewer model request timed out after 10ms.");
+    ).rejects.toThrow(/Reviewer model request timed out after 10ms/);
 
     // Listener should be cleaned up — aborting the external controller
     // after the internal timeout has already fired should be harmless.

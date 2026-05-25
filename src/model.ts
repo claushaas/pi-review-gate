@@ -16,7 +16,10 @@ function isPositiveInteger(value: number): boolean {
 }
 
 function createTimeoutError(timeoutMs: number): Error {
-  return new Error(`Reviewer model request timed out after ${timeoutMs}ms.`);
+  const seconds = (timeoutMs / 1000).toFixed(0);
+  return new Error(
+    `Reviewer model request timed out after ${timeoutMs}ms (${seconds}s). Use /review-gate timeout <ms> to increase the timeout.`,
+  );
 }
 
 function createAbortError(): Error {

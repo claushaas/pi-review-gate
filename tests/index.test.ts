@@ -1964,13 +1964,13 @@ describe("handleAgentEnd model failure handling", () => {
         }),
         context: { modelRegistry },
       }),
-    ).rejects.toThrow("Reviewer model request timed out after 10ms.");
+    ).rejects.toThrow(/Reviewer model request timed out after 10ms/);
 
     expect(pi.appendEntry).toHaveBeenCalledWith(
       REVIEW_ERROR_ENTRY_TYPE,
       expect.objectContaining({
         error: expect.objectContaining({
-          message: "Reviewer model request timed out after 10ms.",
+          message: expect.stringContaining("Reviewer model request timed out after 10ms"),
         }),
       }),
     );

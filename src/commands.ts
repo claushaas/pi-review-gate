@@ -324,6 +324,7 @@ Reviewer model: ${formatReviewerModel(config)}
 Max correction cycles: ${config.maxCorrectionCycles}
 Git diff: ${gitDiffStatus}
 Session context: ${sessionContextStatus}
+Reviewer timeout: ${config.reviewer.timeoutMs}ms
 ## Commands
 /review-gate status
 /review-gate on
@@ -332,6 +333,7 @@ Session context: ${sessionContextStatus}
 /review-gate model <provider>/<id> [thinkingLevel]
 /review-gate thinking           (interactive picker when no args)
 /review-gate thinking <thinkingLevel>
+/review-gate timeout <ms>
 /review-gate max-cycles <number>
 /review-gate toggle-git-diff
 /review-gate toggle-session-context
@@ -416,6 +418,32 @@ async function handleReviewGateMaxCycles(
     maxCorrectionCycles: num,
   });
   ctx.ui.notify(`Max correction cycles set to ${num}.`);
+}
+
+async function handleReviewGateTimeout(
+  value: string,
+  loadConfig: () => Promise<ReviewGateConfig>,
+  saveConfig: (config: ReviewGateConfig) => Promise<void>,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  if (!isPositiveIntegerText(value)) {
+    ctx.ui.notify("Invalid timeout. Expected a positive integer (milliseconds).");
+    return;
+  }
+  const num = Number(value);
+  if (num < 5000) {
+    ctx.ui.notify("Timeout must be at least 5000ms (5 seconds).");
+    return;
+  }
+  const config = await loadConfig();
+  await saveConfig({
+    ...config,
+    reviewer: {
+      ...config.reviewer,
+      timeoutMs: num,
+    },
+  });
+  ctx.ui.notify(`Reviewer timeout set to ${num}ms (${(num / 1000).toFixed(0)}s).`);
 }
 
 async function handleReviewGateToggleGitDiff(
@@ -508,6 +536,10 @@ export function registerCommands(params: {
         }
         if (command === "max-cycles") {
           await handleReviewGateMaxCycles(subArgs, loadConfig, saveConfig, ctx);
+          return;
+        }
+        if (command === "timeout") {
+          await handleReviewGateTimeout(subArgs, loadConfig, saveConfig, ctx);
           return;
         }
         if (command === "toggle-git-diff") {

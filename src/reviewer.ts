@@ -147,6 +147,15 @@ export function getWarningMessage(result: ReviewGateResult): string {
   return result.summary.trim().length > 0 ? result.summary : "Review was not approved.";
 }
 
+/**
+ * Returns a pass message for approved-review notification.
+ * Uses the reviewer summary when non-empty, otherwise falls back to a
+ * stable default.
+ */
+export function getPassMessage(result: ReviewGateResult): string {
+  return result.summary.trim().length > 0 ? result.summary : "No issues found.";
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -610,7 +619,17 @@ export async function handleAgentEnd(params: {
       model: config.reviewerModel,
     });
 
-    // 7. Approved: return without follow-up (nothing more to do)
+    // 7. Approved: notify on pass when configured, then return.
+    if (result.approved) {
+      if (config.ui.notifyOnPass && context?.ui?.notify) {
+        await context.ui.notify({
+          title: "Review gate passed",
+          message: getPassMessage(result),
+          severity: "info",
+        });
+      }
+      return;
+    }
 
     // 8. Rejected in block mode: send mandatory follow-up when cycles remain
     if (!result.approved && config.mode === "block") {
