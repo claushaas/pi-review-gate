@@ -2,6 +2,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import {
   COMMAND_REVIEW_GATE,
   COMMAND_REVIEW_GATE_MODEL,
+  COMMAND_REVIEW_GATE_MODELS,
   COMMAND_REVIEW_GATE_OFF,
   COMMAND_REVIEW_GATE_ON,
   COMMAND_REVIEW_GATE_STATUS,
@@ -191,11 +192,15 @@ async function listReviewerModels(modelRegistry: ModelRegistryAPI): Promise<stri
   if (models.length === 0) {
     return "No models available in registry.";
   }
-  const modelsList = formatAvailableModels(models);
-  return `# Available Reviewer Models
-Use:
-/review-gate-model <provider>/<id> [thinkingLevel]
-${modelsList}`;
+  const modelsList = models
+    .map((model) => {
+      const id = modelCandidateToId(model);
+      const label = formatModelLabel(model);
+      const cmd = `/review-gate-model ${id}`;
+      return `${label}\n  ${cmd}`;
+    })
+    .join("\n");
+  return `# Available Reviewer Models\n\nSelect one by running the command shown:\n\n${modelsList}\n\nOr pick interactively with /review-gate model.`;
 }
 
 function modelCandidateToId(model: ModelRegistryCandidate): string {
@@ -206,6 +211,90 @@ function modelCandidateToLabel(model: ModelRegistryCandidate): string {
   const id = modelCandidateToId(model);
   const suffix = model.name ? ` — ${model.name}` : "";
   return `${id}${suffix}`;
+}
+
+function truncatePlain(text: string, width: number): string {
+  if (width <= 0) return "";
+  if (text.length <= width) return text;
+  return `${text.slice(0, Math.max(0, width - 1))}…`;
+}
+
+async function selectReviewerModelInteractively(
+  ctx: ExtensionCommandContext,
+  models: ModelRegistryCandidate[],
+): Promise<string | undefined> {
+  const items = models.map((model) => ({
+    value: modelCandidateToId(model),
+    label: modelCandidateToLabel(model),
+  }));
+
+  if (typeof ctx.ui.custom !== "function") {
+    const choice = await ctx.ui.select(
+      "Select reviewer model:",
+      models.map((model) => modelCandidateToId(model)),
+    );
+    return choice ?? undefined;
+  }
+
+  return await ctx.ui.custom<string | undefined>((tui, theme, keybindings, done) => {
+    let selectedIndex = 0;
+    const maxVisible = Math.min(items.length, 10);
+
+    return {
+      render(width: number): string[] {
+        const lines: string[] = [];
+        lines.push(theme.fg("accent", theme.bold("Select reviewer model:")));
+        lines.push("");
+
+        const start = Math.max(
+          0,
+          Math.min(selectedIndex - Math.floor(maxVisible / 2), items.length - maxVisible),
+        );
+        const end = Math.min(start + maxVisible, items.length);
+
+        for (let i = start; i < end; i++) {
+          const item = items[i]!;
+          const prefix = i === selectedIndex ? "→ " : "  ";
+          const line = truncatePlain(`${prefix}${item.label}`, width);
+          lines.push(i === selectedIndex ? theme.fg("accent", line) : theme.fg("text", line));
+        }
+
+        if (items.length > maxVisible) {
+          lines.push(
+            theme.fg("dim", truncatePlain(`(${selectedIndex + 1}/${items.length})`, width)),
+          );
+        }
+
+        lines.push("");
+        lines.push(
+          theme.fg("dim", truncatePlain("↑↓ navigate • enter select • esc cancel", width)),
+        );
+        return lines;
+      },
+      handleInput(data: string): void {
+        if (keybindings.matches(data, "tui.select.up") || data === "k") {
+          selectedIndex =
+            selectedIndex === 0 ? items.length - 1 : selectedIndex - 1;
+          tui.requestRender();
+        } else if (
+          keybindings.matches(data, "tui.select.down") ||
+          data === "j"
+        ) {
+          selectedIndex =
+            selectedIndex === items.length - 1 ? 0 : selectedIndex + 1;
+          tui.requestRender();
+        } else if (
+          keybindings.matches(data, "tui.select.confirm") ||
+          data === "\n"
+        ) {
+          done(items[selectedIndex]?.value);
+        } else if (keybindings.matches(data, "tui.select.cancel")) {
+          done(undefined);
+        }
+      },
+      invalidate(): void {},
+    };
+  });
 }
 
 function getModelRegistry(
@@ -241,17 +330,14 @@ async function handleReviewGateModel(params: {
       return;
     }
 
-    const choice = await ctx.ui.select(
-      "Select reviewer model:",
-      models.map((model) => modelCandidateToId(model)),
-    );
+    const choice = await selectReviewerModelInteractively(ctx, models);
 
     if (choice === null || choice === undefined) {
       return;
     }
 
     await applyModelSelection({
-      modelSpec: String(choice),
+      modelSpec: choice,
       loadConfig,
       saveConfig,
       context,
@@ -331,6 +417,7 @@ Reviewer timeout: ${config.reviewer.timeoutMs}ms
 /review-gate off
 /review-gate model              (interactive picker when no args)
 /review-gate model <provider>/<id> [thinkingLevel]
+/review-gate models             (list models with direct select commands)
 /review-gate thinking           (interactive picker when no args)
 /review-gate thinking <thinkingLevel>
 /review-gate timeout <ms>
@@ -342,7 +429,8 @@ Direct commands are also available:
 /review-gate-status
 /review-gate-on
 /review-gate-off
-/review-gate-model`;
+/review-gate-model
+/review-gate-models`;
 }
 
 function parseReviewGateMenuInput(text: string): { command: string; args: string } {
@@ -480,6 +568,19 @@ async function handleReviewGateToggleSessionContext(
   ctx.ui.notify(newValue ? "Session context enabled." : "Session context disabled.");
 }
 
+async function handleReviewGateModels(
+  context: ReviewGateCommandContext | undefined,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  const registry = getModelRegistry(context, ctx);
+  if (!registry) {
+    ctx.ui.notify("Model registry is not available.");
+    return;
+  }
+  const message = await listReviewerModels(registry);
+  ctx.ui.notify(message, "info");
+}
+
 export function registerCommands(params: {
   pi: ReviewGateCommandAPI;
   loadConfig: () => Promise<ReviewGateConfig>;
@@ -550,6 +651,10 @@ export function registerCommands(params: {
           await handleReviewGateToggleSessionContext(loadConfig, saveConfig, ctx);
           return;
         }
+        if (command === "models") {
+          await handleReviewGateModels(context, ctx);
+          return;
+        }
         if (command === "manual") {
           ctx.ui.notify("Manual review is not implemented yet.");
           return;
@@ -596,6 +701,13 @@ export function registerCommands(params: {
         const nextConfig = createEnabledConfig(config, false);
         await saveConfig(nextConfig);
         ctx.ui.notify("Review gate disabled.");
+      },
+    },
+    {
+      name: COMMAND_REVIEW_GATE_MODELS,
+      description: "List available reviewer models with direct select commands.",
+      handler: async (_args: string, ctx: ExtensionCommandContext) => {
+        await handleReviewGateModels(context, ctx);
       },
     },
   ];

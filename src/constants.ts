@@ -9,6 +9,7 @@ export const COMMAND_REVIEW_GATE_STATUS = "/review-gate-status";
 export const COMMAND_REVIEW_GATE_MODEL = "/review-gate-model";
 export const COMMAND_REVIEW_GATE_ON = "/review-gate-on";
 export const COMMAND_REVIEW_GATE_OFF = "/review-gate-off";
+export const COMMAND_REVIEW_GATE_MODELS = "/review-gate-models";
 
 export const CUSTOM_ENTRY_REVIEW_RESULT = "pi-review-gate-result";
 export const CUSTOM_ENTRY_REVIEW_SKIPPED = "pi-review-gate-skipped";

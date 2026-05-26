@@ -4,6 +4,7 @@ import { defaultConfig } from "../src/config.js";
 import {
   COMMAND_REVIEW_GATE,
   COMMAND_REVIEW_GATE_MODEL,
+  COMMAND_REVIEW_GATE_MODELS,
   COMMAND_REVIEW_GATE_OFF,
   COMMAND_REVIEW_GATE_ON,
   COMMAND_REVIEW_GATE_STATUS,
@@ -3702,7 +3703,7 @@ describe("registerCommands", () => {
     const saveConfig = vi.fn();
     registerCommands({ pi, loadConfig, saveConfig });
 
-    expect(pi.registerCommand).toHaveBeenCalledTimes(5);
+    expect(pi.registerCommand).toHaveBeenCalledTimes(6);
 
     const commandNames = pi.registerCommand.mock.calls.map((call) => call[0]);
     expect(commandNames).toEqual([
@@ -3711,6 +3712,7 @@ describe("registerCommands", () => {
       toRuntimeCommandName(COMMAND_REVIEW_GATE_MODEL),
       toRuntimeCommandName(COMMAND_REVIEW_GATE_ON),
       toRuntimeCommandName(COMMAND_REVIEW_GATE_OFF),
+      toRuntimeCommandName(COMMAND_REVIEW_GATE_MODELS),
     ]);
 
     for (const call of pi.registerCommand.mock.calls) {
@@ -3759,7 +3761,7 @@ describe("extension entrypoint command registration", () => {
 
     await extensionFactory(pi as unknown as Parameters<typeof extensionFactory>[0]);
 
-    expect(pi.registerCommand).toHaveBeenCalledTimes(5);
+    expect(pi.registerCommand).toHaveBeenCalledTimes(6);
     expect(pi.on).toHaveBeenCalledWith("agent_end", expect.any(Function));
     expect(pi.exec).not.toHaveBeenCalled();
     expect(pi.appendEntry).not.toHaveBeenCalled();
@@ -4155,7 +4157,7 @@ describe("extension entrypoint injection", () => {
 
     await extensionFactory(pi as unknown as Parameters<typeof extensionFactory>[0]);
 
-    expect(pi.registerCommand).toHaveBeenCalledTimes(5);
+    expect(pi.registerCommand).toHaveBeenCalledTimes(6);
     expect(pi.on).toHaveBeenCalledWith("agent_end", expect.any(Function));
   });
 
@@ -4898,7 +4900,7 @@ describe("command preservation after model implementation", () => {
 // ---------------------------------------------------------------------------
 
 describe("extension entrypoint with model registry", () => {
-  it("registers all 5 commands and agent_end hook", async () => {
+  it("registers all 6 commands and agent_end hook", async () => {
     const pi = {
       registerCommand: vi.fn(),
       on: vi.fn(),
@@ -4909,7 +4911,7 @@ describe("extension entrypoint with model registry", () => {
 
     await extensionFactory(pi as unknown as Parameters<typeof extensionFactory>[0]);
 
-    expect(pi.registerCommand).toHaveBeenCalledTimes(5);
+    expect(pi.registerCommand).toHaveBeenCalledTimes(6);
     expect(pi.on).toHaveBeenCalledWith("agent_end", expect.any(Function));
   });
 
@@ -5771,7 +5773,7 @@ describe("review gate direct command preservation", () => {
     expect(ctx.ui.notify).toHaveBeenCalledWith("Model registry is not available.");
   });
 
-  it("registers all 5 commands", async () => {
+  it("registers all 6 commands", async () => {
     const pi = {
       registerCommand: vi.fn(),
       on: vi.fn(),
@@ -5783,7 +5785,7 @@ describe("review gate direct command preservation", () => {
     const saveConfig = vi.fn();
     registerCommands({ pi, loadConfig, saveConfig });
 
-    expect(pi.registerCommand).toHaveBeenCalledTimes(5);
+    expect(pi.registerCommand).toHaveBeenCalledTimes(6);
     const commandNames = pi.registerCommand.mock.calls.map((call) => call[0]);
     expect(commandNames).toEqual([
       toRuntimeCommandName(COMMAND_REVIEW_GATE),
@@ -5791,6 +5793,7 @@ describe("review gate direct command preservation", () => {
       toRuntimeCommandName(COMMAND_REVIEW_GATE_MODEL),
       toRuntimeCommandName(COMMAND_REVIEW_GATE_ON),
       toRuntimeCommandName(COMMAND_REVIEW_GATE_OFF),
+      toRuntimeCommandName(COMMAND_REVIEW_GATE_MODELS),
     ]);
   });
 

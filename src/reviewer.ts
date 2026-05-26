@@ -120,7 +120,7 @@ type ReviewGateSessionManagerAPI = {
  * Minimal notification API optionally provided by the host runtime.
  * When absent, warnings are simply skipped without error.
  */
-type ReviewGateNotificationAPI = {
+export type ReviewGateNotificationAPI = {
   notify?: (params: {
     title: string;
     message: string;
@@ -554,6 +554,13 @@ export async function handleAgentEnd(params: {
         reason: "Reviewer model is not configured.",
         model: null,
       });
+      if (config.ui.notifyOnFail && context?.ui?.notify) {
+        await context.ui.notify({
+          title: "Review gate skipped",
+          message: "Reviewer model is not configured.",
+          severity: "warning",
+        });
+      }
       return;
     }
 
